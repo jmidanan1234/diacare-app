@@ -41,7 +41,9 @@ class SyncService {
     try {
       final records = await _db
           .collection('health_records')
-          .where('bhwId', isEqualTo: bhwId)
+          // Same field the rules compare, so the read is legal - keying
+          // this on bhwId would be refused outright.
+          .where('assignedBhwId', isEqualTo: bhwId)
           .get(const GetOptions(source: Source.cache));
 
       if (records.docs.any((d) => d.metadata.hasPendingWrites)) return true;

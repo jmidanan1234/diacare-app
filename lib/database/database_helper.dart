@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../models/patient.dart';
 import '../models/health_record.dart';
 import '../models/notification_model.dart';
+import '../utils/constants.dart';
 
 /// The app's data layer, backed by Firestore.
 ///
@@ -81,48 +82,42 @@ class DatabaseHelper {
      because it is what the rules and the dashboard already read.
      ================================================================ */
 
+  /// Returns the app's own constants rather than copies of them. Spelling
+  /// them out here meant two sources for the same word: statusPending is
+  /// 'Pending Approval', and a literal 'Pending' matched it only because
+  /// nothing compared the two directly.
   static String _statusToApp(String? stored) {
     switch ((stored ?? '').toLowerCase()) {
       case 'approved':
-        return 'Approved';
+        return AppConstants.statusApproved;
       case 'inactive':
-        return 'Inactive';
+        return AppConstants.statusInactive;
       default:
-        return 'Pending';
+        return AppConstants.statusPending;
     }
   }
 
   static String _statusToStored(String appStatus) {
-    switch (appStatus.toLowerCase()) {
-      case 'approved':
-        return 'approved';
-      case 'inactive':
-        return 'inactive';
-      default:
-        return 'pending';
-    }
+    if (appStatus == AppConstants.statusApproved) return 'approved';
+    if (appStatus == AppConstants.statusInactive) return 'inactive';
+    return 'pending';
   }
 
   static String _riskToApp(String? stored) {
     switch ((stored ?? '').toLowerCase()) {
       case 'critical':
-        return 'Highly At Risk';
+        return AppConstants.riskHigh;
       case 'warning':
-        return 'At Risk';
+        return AppConstants.riskModerate;
       default:
-        return 'Normal';
+        return AppConstants.riskNormal;
     }
   }
 
   static String _riskToStored(String appRisk) {
-    switch (appRisk) {
-      case 'Highly At Risk':
-        return 'critical';
-      case 'At Risk':
-        return 'warning';
-      default:
-        return 'normal';
-    }
+    if (appRisk == AppConstants.riskHigh) return 'critical';
+    if (appRisk == AppConstants.riskModerate) return 'warning';
+    return 'normal';
   }
 
 
@@ -278,11 +273,12 @@ class DatabaseHelper {
       );
 
   Future<List<HealthRecord>> getRecordsByPatient(String patientId) async {
-    // bhwId is here to satisfy the rules, not to narrow the result: a
-    // patient's records all belong to the worker assigned to them.
+    // Keyed on the assigned worker, not the author, so a visit encoded at
+    // the RHU appears in the patient's history here too. The filter is
+    // also what makes the read legal - the rules compare the same field.
     final snap = await _records
         .where('patientId', isEqualTo: patientId)
-        .where('bhwId', isEqualTo: _uid)
+        .where('assignedBhwId', isEqualTo: _uid)
         .get();
     return snap.docs.map((d) => _toRecord(d.id, d.data())).toList()
       ..sort((a, b) => b.visitDate.compareTo(a.visitDate));
@@ -297,13 +293,15 @@ class DatabaseHelper {
   }
 
   Future<List<HealthRecord>> getAllRecordsByBhw(String bhwId) async {
-    final snap = await _records.where('bhwId', isEqualTo: bhwId).get();
+    final snap =
+        await _records.where('assignedBhwId', isEqualTo: bhwId).get();
     return snap.docs.map((d) => _toRecord(d.id, d.data())).toList()
       ..sort((a, b) => b.visitDate.compareTo(a.visitDate));
   }
 
   Future<int> getTotalRecordCountByBhw(String bhwId) async {
-    final snap = await _records.where('bhwId', isEqualTo: bhwId).count().get();
+    final snap =
+        await _records.where('assignedBhwId', isEqualTo: bhwId).count().get();
     return snap.count ?? 0;
   }
 
@@ -315,7 +313,12 @@ class DatabaseHelper {
   Future<void> insertHealthRecord(HealthRecord record) async {
     await _records.doc(record.id).set({
       'patientId': record.patientId,
+      // Who took the reading.
       'bhwId': record.bhwId,
+      // Who follows this patient. The rules read this rather than bhwId,
+      // so a visit encoded at the RHU still appears in this worker's
+      // history for the same patient.
+      'assignedBhwId': record.bhwId,
       'bloodGlucose': record.bloodGlucose,
       'systolicBP': record.systolicBP,
       'diastolicBP': record.diastolicBP,
@@ -335,10 +338,6 @@ class DatabaseHelper {
       'referral': 'none',
     });
   }
-
-  /// Kept so the old sync flow still compiles. There is nothing to mark:
-  /// Firestore queues writes itself and sends them when signal returns.
-  Future<void> markAllRecordsSynced(String bhwId) async {}
 
   /* ================================================================
      COUNTS

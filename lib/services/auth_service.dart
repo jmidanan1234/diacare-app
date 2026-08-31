@@ -100,12 +100,23 @@ class AuthService {
 
     await _loadProfile();
 
-    /// The device token is fetched at startup, before anyone has signed
-    /// in, so there was no profile to attach it to. Now there is - without
-    /// this the health unit has no way to reach this handset.
+    if (_currentUser == null) {
+      // Signed in to Firebase but the profile could not be read. Leaving
+      // it there is the worst outcome: the app says the login failed
+      // while the session quietly persists, so the next screen to ask
+      // Firebase who is signed in gets an answer the app has disowned.
+      await _auth.signOut();
+      lastError =
+          'Your account is not set up for the app. Contact your Barangay Health Nurse.';
+      return false;
+    }
+
+    // The device token is fetched at startup, before anyone has signed
+    // in, so there was no profile to attach it to. Now there is - without
+    // this the health unit has no way to reach this handset.
     unawaited(FCMService().publishTokenForCurrentUser());
 
-    return _currentUser != null;
+    return true;
   }
 
   /// Firebase restores the session on its own, so this only has to rebuild
@@ -114,8 +125,25 @@ class AuthService {
   Future<bool> restoreSession() async {
     if (_auth.currentUser == null) return false;
     await _loadProfile();
+
+    if (_currentUser == null) {
+      // A deleted or deactivated account, or a profile this session can no
+      // longer read. Ending the session sends the app to the login screen
+      // rather than into a dashboard with nothing behind it.
+      await _auth.signOut();
+      return false;
+    }
+
+    // An account deactivated at the RHU should not keep working here just
+    // because this device still holds a session.
+    if (!_currentUser!.isActive) {
+      await logout();
+      lastError = 'This account has been deactivated.';
+      return false;
+    }
+
     unawaited(FCMService().publishTokenForCurrentUser());
-    return _currentUser != null;
+    return true;
   }
 
   Future<void> _loadProfile() async {
