@@ -29,6 +29,13 @@ class DatabaseHelper {
 
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
+  /// Firestore rejects a query it cannot prove satisfies the rules, even
+  /// when every document it would return is allowed. A rule that says
+  /// "only your own records" therefore requires the query to say so too —
+  /// filtering by owner is not an optimisation here, it is what makes the
+  /// read legal at all.
+  String get _uid => FirebaseAuth.instance.currentUser?.uid ?? '';
+
   CollectionReference<Map<String, dynamic>> get _patients =>
       _db.collection('patients');
   CollectionReference<Map<String, dynamic>> get _records =>
@@ -228,7 +235,11 @@ class DatabaseHelper {
     DateTime birthDate,
     String excludeId,
   ) async {
+    // Scoped to this worker's own patients, which is both what the rules
+    // allow and the only comparison that means anything — a name matching
+    // someone in another barangay is not a duplicate this BHW can act on.
     final snap = await _patients
+        .where('assignedBhwId', isEqualTo: _uid)
         .where('firstName', isEqualTo: firstName)
         .where('lastName', isEqualTo: lastName)
         .get();
@@ -267,8 +278,12 @@ class DatabaseHelper {
       );
 
   Future<List<HealthRecord>> getRecordsByPatient(String patientId) async {
-    final snap =
-        await _records.where('patientId', isEqualTo: patientId).get();
+    // bhwId is here to satisfy the rules, not to narrow the result: a
+    // patient's records all belong to the worker assigned to them.
+    final snap = await _records
+        .where('patientId', isEqualTo: patientId)
+        .where('bhwId', isEqualTo: _uid)
+        .get();
     return snap.docs.map((d) => _toRecord(d.id, d.data())).toList()
       ..sort((a, b) => b.visitDate.compareTo(a.visitDate));
   }
@@ -391,6 +406,7 @@ class DatabaseHelper {
   /// time the app recalculates.
   Future<bool> hasActiveNoVisitNotification(String patientId) async {
     final snap = await _notifications
+        .where('bhwId', isEqualTo: _uid)
         .where('patientId', isEqualTo: patientId)
         .where('type', isEqualTo: 'no_visit')
         .where('resolved', isEqualTo: false)
@@ -404,7 +420,7 @@ class DatabaseHelper {
       // NotificationModel has no bhwId of its own - these are raised on
       // the device for whoever is signed in, so the owner is taken from
       // the session rather than passed through every call site.
-      'bhwId': FirebaseAuth.instance.currentUser?.uid ?? '',
+      'bhwId': _uid,
       'patientId': notif.patientId,
       'patientName': notif.patientName,
       'type': notif.type,
@@ -421,6 +437,7 @@ class DatabaseHelper {
 
   Future<void> resolveNoVisitNotifications(String patientId) async {
     final snap = await _notifications
+        .where('bhwId', isEqualTo: _uid)
         .where('patientId', isEqualTo: patientId)
         .where('type', isEqualTo: 'no_visit')
         .where('resolved', isEqualTo: false)

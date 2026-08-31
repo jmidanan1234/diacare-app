@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/user_model.dart';
+import 'fcm_service.dart';
 
 /// Sign-in for the mobile app.
 ///
@@ -33,6 +36,9 @@ class AuthService {
 
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+
+  /// Profile photos are device-local — see updatePhoto for why.
+  static const String _keyPhotoPrefix = 'profile_photo_';
 
   UserModel? _currentUser;
   UserModel? get currentUser => _currentUser;
@@ -93,6 +99,12 @@ class AuthService {
     }
 
     await _loadProfile();
+
+    /// The device token is fetched at startup, before anyone has signed
+    /// in, so there was no profile to attach it to. Now there is - without
+    /// this the health unit has no way to reach this handset.
+    unawaited(FCMService().publishTokenForCurrentUser());
+
     return _currentUser != null;
   }
 
@@ -102,6 +114,7 @@ class AuthService {
   Future<bool> restoreSession() async {
     if (_auth.currentUser == null) return false;
     await _loadProfile();
+    unawaited(FCMService().publishTokenForCurrentUser());
     return _currentUser != null;
   }
 
@@ -144,7 +157,8 @@ class AuthService {
         isActive: (data['status'] as String? ?? 'active') == 'active',
         mustChangePassword: data['mustChangePassword'] == true,
         createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
-        photoPath: data['photo'] as String?,
+        photoPath: (await SharedPreferences.getInstance())
+            .getString('$_keyPhotoPrefix$id'),
       );
     } catch (e) {
       _currentUser = null;
@@ -209,15 +223,25 @@ class AuthService {
   }
 
   /// [photoPath] is null to clear the photo (revert to the initials avatar).
+  ///
+  /// Kept on the device rather than written to the shared profile. The
+  /// picker returns a path to a file on this phone, and the dashboard
+  /// renders users/photo directly into an img tag — storing it there would
+  /// put a broken image on the RHU's screens and tell every other device a
+  /// file it does not have. Sharing a real photo needs it uploaded
+  /// somewhere both halves can fetch, which is Firebase Storage and a
+  /// separate piece of work.
   Future<bool> updatePhoto(String? photoPath) async {
     final id = _auth.currentUser?.uid;
     if (id == null) return false;
 
     try {
-      await _db.collection('users').doc(id).update({
-        'photo': photoPath ?? '',
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
+      final prefs = await SharedPreferences.getInstance();
+      if (photoPath == null) {
+        await prefs.remove('$_keyPhotoPrefix$id');
+      } else {
+        await prefs.setString('$_keyPhotoPrefix$id', photoPath);
+      }
       await _loadProfile();
       return true;
     } catch (e) {
