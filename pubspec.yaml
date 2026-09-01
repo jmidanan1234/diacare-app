@@ -41,6 +41,10 @@ dependencies:
   http: ^1.2.2
 
 dev_dependencies:
+  # Generates the Android launcher icons from assets/images/logo.png into
+  # every mipmap density. Doing it by hand means five hand-resized PNGs
+  # that drift apart the next time the logo changes.
+  flutter_launcher_icons: ^0.14.1
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
@@ -49,3 +53,24 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/
+
+# ================================================================
+# LAUNCHER ICON
+#
+# Regenerate after changing the logo:
+#   dart run flutter_launcher_icons
+#
+# adaptive_icon_background is the green the app's own header uses, so the
+# icon sits on brand colour rather than the white plate Android would
+# otherwise put behind a transparent logo on newer devices.
+# ================================================================
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/images/logo.png"
+  adaptive_icon_background: "#0F2E28"
+  adaptive_icon_foreground: "assets/images/logo.png"
+  # The foreground is padded so the logo is not clipped by the circular
+  # and squircle masks different Android launchers apply.
+  adaptive_icon_foreground_inset: 18
+  remove_alpha_ios: true
