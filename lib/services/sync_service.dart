@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -79,27 +81,48 @@ class SyncService {
   /// change. It only reports when data last actually reached the server.
   Future<void> syncIfOnline(String bhwId) async {}
 
-  /// Pushes what is queued on this device, without pulling anything.
+  /// Runs a write and gets it to the server, for actions that are
+  /// themselves a request to send: submitting a patient for approval, or
+  /// filing a visit.
   ///
-  /// For actions that are themselves a request to send: submitting a
-  /// patient for approval, or filing a visit. Manual sync is about not
-  /// chattering in the background, not about holding on to work the
-  /// worker has just pressed a button to submit - a registration that
-  /// sits in a local queue looks submitted on the phone and does not
-  /// exist at the health unit, which is the worst of both.
+  /// The awaiting is the subtle part. A Firestore write returns a Future
+  /// that completes when the SERVER acknowledges it - offline, the local
+  /// cache updates immediately but that Future never completes. Awaiting a
+  /// write with the network switched off therefore hangs forever, which is
+  /// what a submit button spinning and never finishing looks like.
   ///
-  /// Returns false when it could not reach the server; the work stays
-  /// queued and the next Sync Now sends it.
-  Future<bool> pushNow() async {
-    if (!await isOnline) return false;
+  /// So: online, the network is enabled first and the write is awaited
+  /// properly. Offline, the write is applied locally and deliberately not
+  /// awaited - it goes out with the next Sync Now.
+  ///
+  /// Returns true when the work reached the server.
+  Future<bool> submit(Future<void> Function() write) async {
+    final online = await isOnline;
+
+    if (!online) {
+      /* Applied to the local cache; the Future will complete whenever the
+         phone next reaches the server. Awaiting it here would hang. */
+      unawaited(write().catchError((e) {
+        // ignore: avoid_print
+        print('Queued write failed once online: $e');
+      }));
+      return false;
+    }
 
     try {
       await _db.enableNetwork();
-      await _db.waitForPendingWrites().timeout(const Duration(seconds: 20));
+      await write().timeout(const Duration(seconds: 25));
+
+      /* Anything queued from earlier offline work goes out too, so a
+         submit made in signal also clears what was recorded without. */
+      await _db.waitForPendingWrites().timeout(const Duration(seconds: 25));
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_keyLastSync, DateTime.now().toIso8601String());
       return true;
+    } on TimeoutException {
+      /* The write is still queued and will go out later; it is not lost. */
+      return false;
     } catch (_) {
       return false;
     } finally {
@@ -124,6 +147,7 @@ class SyncService {
          the honest definition of "my work is saved at the health unit",
          and the reason this is awaited rather than fired off. */
       await _db.waitForPendingWrites().timeout(const Duration(seconds: 30));
+
 
       /* A deliberate server read, not from cache: this is what pulls in
          patients and alerts other people have added. */

@@ -89,14 +89,26 @@ class AppProvider extends ChangeNotifier {
     final allPatients = await _db.getAllPatientsByBhw(bhwId);
     _patients = allPatients.where((p) => p.status == 'Approved').toList();
     _pendingPatients = allPatients.where((p) => p.status != 'Approved').toList();
-    _allRecords = await _db.getAllRecordsByBhw(bhwId);
-    /* _allRecords was just loaded; counting it costs nothing, where the
-       aggregation query was another round trip for the same number. */
+    /* Records and alerts exist for RHU-encoded patients too, and the app
+       deliberately does not show those patients. Left unfiltered, their
+       readings appeared in Health Records as "Unknown patient" - a visit
+       with real vitals and nobody attached to it, which is worse than not
+       showing it at all.
+
+       Filtered against the patients this app can actually see, so every
+       row can name who it is about. */
+    final visible = allPatients.map((p) => p.id).toSet();
+
+    final everyRecord = await _db.getAllRecordsByBhw(bhwId);
+    _allRecords = everyRecord.where((r) => visible.contains(r.patientId)).toList();
     _totalRecordCount = _allRecords.length;
+
     /* From the shared store, so an alert raised at the RHU - or by
        another BHW - appears here too, and one acknowledged anywhere is
-       acknowledged everywhere. */
-    _notifications = await _alerts.fetchAll();
+       acknowledged everywhere. Same filter, for the same reason: an
+       alert about a patient this app cannot open is not actionable. */
+    final everyAlert = await _alerts.fetchAll();
+    _notifications = everyAlert.where((n) => visible.contains(n.patientId)).toList();
     _lastSyncTime = await _sync.getLastSyncTime();
 
     _isLoading = false;
@@ -218,8 +230,10 @@ class AppProvider extends ChangeNotifier {
       updatedAt: now,
     );
 
-    await _db.insertHealthRecord(record);
-    await _db.updatePatientRisk(patientId, riskLevel);
+    await _sync.submit(() async {
+      await _db.insertHealthRecord(record);
+      await _db.updatePatientRisk(patientId, riskLevel);
+    });
     // A visit was just logged, so any earlier "not visited in 7+ days"
     // alert for this patient is now stale — clear it rather than leaving
     // it sitting in Notifications claiming the patient still hasn't been seen.
@@ -275,9 +289,6 @@ class AppProvider extends ChangeNotifier {
       await _alerts.resolve(patientId, AlertsService.typeAtRisk);
     }
 
-    /* Same reasoning as a registration: filing a visit is an act of
-       submitting it. */
-    await _sync.pushNow();
     _lastSyncTime = await _sync.getLastSyncTime();
 
     await loadAll();
@@ -285,14 +296,13 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<void> addPatient(Patient patient) async {
-    await _db.insertPatient(patient);
+    /* Submitting for approval is a request to send, so the write goes to
+       the server now rather than waiting for the next Sync Now.
 
-    /* Submitting for approval is a request to send, so it is pushed now
-       rather than waiting for the next Sync Now. Firestore accepts a
-       write into its local cache and reports success immediately, so
-       without this the registration looked submitted on the phone while
-       the health unit had never seen it. */
-    await _sync.pushNow();
+       submit() owns the awaiting, because a Firestore write only
+       completes once the server has it: awaiting one with the network
+       off hangs forever, which is exactly what the submit button did. */
+    await _sync.submit(() => _db.insertPatient(patient));
     _lastSyncTime = await _sync.getLastSyncTime();
 
     await loadAll();
