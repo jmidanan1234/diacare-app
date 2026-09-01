@@ -41,16 +41,12 @@ class SyncService {
     try {
       final records = await _db
           .collection('health_records')
-          // Same field the rules compare, so the read is legal - keying
-          // this on bhwId would be refused outright.
-          .where('assignedBhwId', isEqualTo: bhwId)
           .get(const GetOptions(source: Source.cache));
 
       if (records.docs.any((d) => d.metadata.hasPendingWrites)) return true;
 
       final patients = await _db
           .collection('patients')
-          .where('assignedBhwId', isEqualTo: bhwId)
           .get(const GetOptions(source: Source.cache));
 
       return patients.docs.any((d) => d.metadata.hasPendingWrites);
@@ -83,7 +79,6 @@ class SyncService {
     try {
       await _db
           .collection('patients')
-          .where('assignedBhwId', isEqualTo: bhwId)
           .limit(1)
           .get(const GetOptions(source: Source.server));
 

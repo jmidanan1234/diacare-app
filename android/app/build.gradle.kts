@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("kotlin-android")
     id("dev.flutter.flutter-gradle-plugin")
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -21,7 +22,9 @@ android {
 
     defaultConfig {
         applicationId = "com.example.diacare"
-        minSdk = flutter.minSdkVersion
+        // Firebase Auth and Firestore both require 21+. Stated here so a
+        // future Flutter default cannot quietly drop below it.
+        minSdk = maxOf(flutter.minSdkVersion, 23)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

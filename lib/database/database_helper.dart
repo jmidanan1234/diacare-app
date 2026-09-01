@@ -179,21 +179,24 @@ class DatabaseHelper {
         'source': 'app',
       };
 
-  /// Approved patients only — the list a BHW works from day to day.
+  /// Approved patients across the whole RHU, not just this worker's own.
+  ///
+  /// The bhwId argument is kept so the callers did not have to change, but
+  /// it no longer narrows anything: a worker covering for a colleague, or
+  /// meeting a patient from the next purok, needs the record that already
+  /// exists rather than starting a second one for the same person.
   Future<List<Patient>> getPatientsByBhw(String bhwId) async {
     final snap = await _patients
-        .where('assignedBhwId', isEqualTo: bhwId)
         .where('status', isEqualTo: 'approved')
         .get();
     return snap.docs.map((d) => _toPatient(d.id, d.data())).toList()
       ..sort((a, b) => a.lastName.compareTo(b.lastName));
   }
 
-  /// Every patient this BHW registered, including ones still awaiting the
+  /// Every patient in the register, including ones still awaiting the
   /// nurse's review.
   Future<List<Patient>> getAllPatientsByBhw(String bhwId) async {
-    final snap =
-        await _patients.where('assignedBhwId', isEqualTo: bhwId).get();
+    final snap = await _patients.get();
     return snap.docs.map((d) => _toPatient(d.id, d.data())).toList()
       ..sort((a, b) => a.lastName.compareTo(b.lastName));
   }
@@ -230,11 +233,10 @@ class DatabaseHelper {
     DateTime birthDate,
     String excludeId,
   ) async {
-    // Scoped to this worker's own patients, which is both what the rules
-    // allow and the only comparison that means anything — a name matching
-    // someone in another barangay is not a duplicate this BHW can act on.
+    // Across the whole register now, not just this worker's own patients.
+    // With a shared roster, the duplicate that matters is the one someone
+    // else already registered.
     final snap = await _patients
-        .where('assignedBhwId', isEqualTo: _uid)
         .where('firstName', isEqualTo: firstName)
         .where('lastName', isEqualTo: lastName)
         .get();
@@ -273,13 +275,11 @@ class DatabaseHelper {
       );
 
   Future<List<HealthRecord>> getRecordsByPatient(String patientId) async {
-    // Keyed on the assigned worker, not the author, so a visit encoded at
-    // the RHU appears in the patient's history here too. The filter is
-    // also what makes the read legal - the rules compare the same field.
-    final snap = await _records
-        .where('patientId', isEqualTo: patientId)
-        .where('assignedBhwId', isEqualTo: _uid)
-        .get();
+    // The patient's whole history, whoever recorded it - another BHW, or
+    // a nurse at the RHU. A shared patient list whose readings were still
+    // private would show a patient with no history at all.
+    final snap =
+        await _records.where('patientId', isEqualTo: patientId).get();
     return snap.docs.map((d) => _toRecord(d.id, d.data())).toList()
       ..sort((a, b) => b.visitDate.compareTo(a.visitDate));
   }
@@ -293,15 +293,13 @@ class DatabaseHelper {
   }
 
   Future<List<HealthRecord>> getAllRecordsByBhw(String bhwId) async {
-    final snap =
-        await _records.where('assignedBhwId', isEqualTo: bhwId).get();
+    final snap = await _records.get();
     return snap.docs.map((d) => _toRecord(d.id, d.data())).toList()
       ..sort((a, b) => b.visitDate.compareTo(a.visitDate));
   }
 
   Future<int> getTotalRecordCountByBhw(String bhwId) async {
-    final snap =
-        await _records.where('assignedBhwId', isEqualTo: bhwId).count().get();
+    final snap = await _records.count().get();
     return snap.count ?? 0;
   }
 
