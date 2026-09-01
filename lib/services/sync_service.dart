@@ -9,11 +9,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// screen reported a successful sync that had never happened — the worst
 /// kind of wrong, because it looked like reassurance.
 ///
-/// Firestore does the syncing now. Writes are queued on the device and sent
-/// when a connection returns, whether or not the app is open, so there is no
-/// push for this class to perform. What is left is telling the truth about
-/// it: whether there is a connection, whether anything is still waiting to
-/// go out, and when data last actually reached the server.
+/// Syncing is manual, by request: Firestore's network is switched off after
+/// sign-in, so the app reads and writes its local cache and nothing leaves
+/// the phone until Sync Now is pressed. That is what makes the button mean
+/// something - left on, Firestore syncs continuously and "Sync Now" would be
+/// decoration.
+///
+/// The trade is deliberate. A BHW walking a barangay is not watching for
+/// other people's edits; they want their own work saved and a moment they
+/// chose to exchange it. Pressing Sync flushes everything queued and pulls
+/// what the RHU and other workers have added since.
 class SyncService {
   static final SyncService _instance = SyncService._internal();
   factory SyncService() => _instance;
@@ -59,36 +64,56 @@ class SyncService {
   /// Called on load. Records the moment data was last confirmed by the
   /// server, so the Profile screen shows when the phone and the health
   /// unit were last actually in agreement.
-  Future<void> syncIfOnline(String bhwId) async {
-    if (!await isOnline) return;
-    await _touchIfServerReachable(bhwId);
+  /// Called after sign-in. Switches the network off so nothing syncs on
+  /// its own from here - the whole point of a manual sync.
+  Future<void> goManual() async {
+    try {
+      await _db.disableNetwork();
+    } catch (_) {
+      // Already disabled, or the SDK is mid-start. Either way the next
+      // sync enables it explicitly.
+    }
   }
 
-  /// The Sync Now button. Returns false when it genuinely could not
-  /// reach the server, so the screen can say so rather than claiming
-  /// success it cannot vouch for.
+  /// Kept so existing callers compile. It no longer syncs: that is the
+  /// change. It only reports when data last actually reached the server.
+  Future<void> syncIfOnline(String bhwId) async {}
+
+  /// The Sync Now button, and the only thing that moves data.
+  ///
+  /// Enables the network, waits for everything queued on this device to be
+  /// acknowledged by the server, pulls the current state, then switches the
+  /// network back off. Returns false when it genuinely could not reach the
+  /// server, so the screen can say so rather than claiming a success it
+  /// cannot vouch for.
   Future<bool> manualSync(String bhwId) async {
     if (!await isOnline) return false;
-    return _touchIfServerReachable(bhwId);
-  }
 
-  /// A deliberate server read — not from cache. If it comes back, the
-  /// device is genuinely talking to Firestore and any queued writes have
-  /// gone with it.
-  Future<bool> _touchIfServerReachable(String bhwId) async {
     try {
+      await _db.enableNetwork();
+
+      /* Waits for the local write queue to be confirmed by the server -
+         the honest definition of "my work is saved at the health unit",
+         and the reason this is awaited rather than fired off. */
+      await _db.waitForPendingWrites().timeout(const Duration(seconds: 30));
+
+      /* A deliberate server read, not from cache: this is what pulls in
+         patients and alerts other people have added. */
       await _db
           .collection('patients')
           .limit(1)
-          .get(const GetOptions(source: Source.server));
+          .get(const GetOptions(source: Source.server))
+          .timeout(const Duration(seconds: 30));
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_keyLastSync, DateTime.now().toIso8601String());
       return true;
     } catch (_) {
-      // Offline, or the server refused. Either way the timestamp is left
-      // alone: it should mean "last confirmed", not "last attempted".
       return false;
+    } finally {
+      /* Back to manual, even if the sync failed - otherwise a failed
+         attempt would silently leave the app syncing continuously. */
+      await goManual();
     }
   }
 }

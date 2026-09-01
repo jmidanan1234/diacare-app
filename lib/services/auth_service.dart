@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/user_model.dart';
 import 'fcm_service.dart';
@@ -185,12 +187,21 @@ class AuthService {
         isActive: (data['status'] as String? ?? 'active') == 'active',
         mustChangePassword: data['mustChangePassword'] == true,
         createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
-        photoPath: (await SharedPreferences.getInstance())
-            .getString('$_keyPhotoPrefix$id'),
+        photoPath: await _resolvePhotoPath(id, data['photo'] as String?),
       );
     } catch (e) {
       _currentUser = null;
     }
+  }
+
+  /// This device's copy of the photo, restored from the profile if the
+  /// file is missing.
+  Future<String?> _resolvePhotoPath(String id, String? stored) async {
+    final prefs = await SharedPreferences.getInstance();
+    final local = prefs.getString('$_keyPhotoPrefix$id');
+
+    if (local != null && File(local).existsSync()) return local;
+    return _materialisePhoto(id, stored);
   }
 
   Future<void> logout() async {
@@ -252,28 +263,75 @@ class AuthService {
 
   /// [photoPath] is null to clear the photo (revert to the initials avatar).
   ///
-  /// Kept on the device rather than written to the shared profile. The
-  /// picker returns a path to a file on this phone, and the dashboard
-  /// renders users/photo directly into an img tag — storing it there would
-  /// put a broken image on the RHU's screens and tell every other device a
-  /// file it does not have. Sharing a real photo needs it uploaded
-  /// somewhere both halves can fetch, which is Firebase Storage and a
-  /// separate piece of work.
+  /// The picker hands over a path to a file on this phone. A path is
+  /// meaningless anywhere else — the dashboard renders users/photo straight
+  /// into an img tag, and another device has no such file — so the image
+  /// itself is stored, base64 in the profile document, and the path is kept
+  /// only as this device's copy for the screen to draw.
+  ///
+  /// The picker already caps it at 640px and 80% quality, which lands well
+  /// under Firestore's 1MB document limit. An image that would not fit is
+  /// refused rather than silently dropped.
   Future<bool> updatePhoto(String? photoPath) async {
     final id = _auth.currentUser?.uid;
     if (id == null) return false;
 
     try {
       final prefs = await SharedPreferences.getInstance();
+
       if (photoPath == null) {
         await prefs.remove('$_keyPhotoPrefix$id');
-      } else {
-        await prefs.setString('$_keyPhotoPrefix$id', photoPath);
+        await _db.collection('users').doc(id).update({
+          'photo': '',
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        await _loadProfile();
+        return true;
       }
+
+      final bytes = await File(photoPath).readAsBytes();
+      if (bytes.length > 700 * 1024) {
+        lastError = 'That photo is too large. Try taking it again.';
+        return false;
+      }
+
+      /* A data URI, so the dashboard can render it with no extra
+         fetching and no storage bucket to configure. */
+      final dataUri = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+
+      await _db.collection('users').doc(id).update({
+        'photo': dataUri,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      await prefs.setString('$_keyPhotoPrefix$id', photoPath);
+
       await _loadProfile();
       return true;
     } catch (e) {
       return false;
+    }
+  }
+
+  /// Rebuilds this device's copy from the stored photo.
+  ///
+  /// Called when the profile has an image but this phone does not — a fresh
+  /// install, or a worker signing in on a second handset. Without it the
+  /// photo would exist on the dashboard and on their other phone, and be
+  /// missing on this one, which reads as having been lost.
+  Future<String?> _materialisePhoto(String id, String? stored) async {
+    if (stored == null || !stored.startsWith('data:image')) return null;
+
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/profile_$id.jpg');
+      final base64Part = stored.substring(stored.indexOf(',') + 1);
+      await file.writeAsBytes(base64Decode(base64Part), flush: true);
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('$_keyPhotoPrefix$id', file.path);
+      return file.path;
+    } catch (_) {
+      return null;
     }
   }
 }

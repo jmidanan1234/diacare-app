@@ -8,6 +8,7 @@ import '../models/user_model.dart';
 import '../services/auth_service.dart';
 import '../services/risk_classifier.dart';
 import '../services/sync_service.dart';
+import '../services/alerts_service.dart';
 import '../services/local_notification_service.dart';
 import '../utils/constants.dart';
 
@@ -16,6 +17,7 @@ class AppProvider extends ChangeNotifier {
   final _auth = AuthService();
   final _sync = SyncService();
   final _localNotif = LocalNotificationService();
+  final _alerts = AlertsService();
   final _uuid = const Uuid();
 
   List<Patient> _patients = [];
@@ -24,6 +26,10 @@ class AppProvider extends ChangeNotifier {
   int _totalRecordCount = 0;
   List<NotificationModel> _notifications = [];
   String? _lastSyncTime;
+
+  /// Firestore starts online so the first load can fill the cache; after
+  /// that the app is manual-only. See loadAll.
+  bool _wentManual = false;
   bool _isLoading = false;
   int _selectedTab = 0;
   /// Set by a dashboard summary card tap, consumed once by PatientListScreen
@@ -85,7 +91,10 @@ class AppProvider extends ChangeNotifier {
     _pendingPatients = allPatients.where((p) => p.status != 'Approved').toList();
     _allRecords = await _db.getAllRecordsByBhw(bhwId);
     _totalRecordCount = await _db.getTotalRecordCountByBhw(bhwId);
-    _notifications = await _db.getNotificationsByBhw(bhwId);
+    /* From the shared store, so an alert raised at the RHU - or by
+       another BHW - appears here too, and one acknowledged anywhere is
+       acknowledged everywhere. */
+    _notifications = await _alerts.fetchAll();
     _lastSyncTime = await _sync.getLastSyncTime();
 
     _isLoading = false;
@@ -95,14 +104,18 @@ class AppProvider extends ChangeNotifier {
     // previously this only ever existed in seed data, never generated.
     await _checkNoVisitAlerts(bhwId);
 
-    // Background sync
-    _sync.syncIfOnline(bhwId).then((_) async {
-      _lastSyncTime = await _sync.getLastSyncTime();
-      // Reload records so any that just got marked synced update their
-      // badge immediately, without waiting for the next manual refresh.
-      _allRecords = await _db.getAllRecordsByBhw(bhwId);
-      notifyListeners();
-    });
+    /* Syncing is manual now, so nothing is started here. Firestore's
+       network is switched off after the first load: the app works from
+       its local cache, and Sync Now on the Profile screen is the only
+       thing that exchanges data with the health unit.
+
+       Done once, after the data is on screen - disabling before the
+       first load would leave a freshly installed app with an empty
+       cache and no way to fill it. */
+    if (!_wentManual) {
+      _wentManual = true;
+      await _sync.goManual();
+    }
   }
 
   Future<void> _checkNoVisitAlerts(String bhwId) async {
@@ -120,29 +133,26 @@ class AppProvider extends ChangeNotifier {
       final isOverdue = lastVisit == null || lastVisit.isBefore(cutoff);
       if (!isOverdue) continue;
 
-      final alreadyAlerted = await _db.hasActiveNoVisitNotification(patient.id);
+      final alreadyAlerted = await _alerts.hasOpenNoVisit(patient.id);
       if (alreadyAlerted) continue;
 
       final message = lastVisit == null
           ? '${patient.fullName} has no recorded visits yet.'
           : '${patient.fullName} has not been visited in ${AppConstants.noVisitDays}+ days.';
 
-      final notif = NotificationModel(
-        id: _uuid.v4(),
+      await _alerts.raise(
         patientId: patient.id,
         patientName: patient.fullName,
-        type: 'no_visit',
-        message: message,
-        isRead: false,
-        createdAt: DateTime.now(),
+        barangay: patient.barangay,
+        type: AlertsService.typeNoVisit,
+        trigger: message,
       );
-      await _db.insertNotification(notif);
       await _localNotif.showNoVisitAlert(patientName: patient.fullName, message: message);
       createdAny = true;
     }
 
     if (createdAny) {
-      _notifications = await _db.getNotificationsByBhw(bhwId);
+      _notifications = await _alerts.fetchAll();
       notifyListeners();
     }
   }
@@ -194,7 +204,7 @@ class AppProvider extends ChangeNotifier {
     // A visit was just logged, so any earlier "not visited in 7+ days"
     // alert for this patient is now stale — clear it rather than leaving
     // it sitting in Notifications claiming the patient still hasn't been seen.
-    await _db.resolveNoVisitNotifications(patientId);
+    await _alerts.resolve(patientId, AlertsService.typeNoVisit);
 
     // Create notification if high risk
     if (riskLevel == AppConstants.riskHigh) {
@@ -214,11 +224,36 @@ class AppProvider extends ChangeNotifier {
         isRead: false,
         createdAt: now,
       );
-      await _db.insertNotification(notif);
+      /* Written to the shared store, so the RHU sees this reading was
+         critical without waiting for anyone to report it. */
+      await _alerts.raise(
+        patientId: patientId,
+        patientName: patient.fullName,
+        barangay: patient.barangay,
+        type: AlertsService.typeCritical,
+        trigger: notif.message,
+      );
+      await _alerts.resolve(patientId, AlertsService.typeAtRisk);
       await _localNotif.showHighRiskAlert(
         patientName: patient.fullName,
         message: notif.message,
       );
+    } else if (riskLevel == AppConstants.riskModerate) {
+      final patient = _patients.firstWhere((p) => p.id == patientId);
+      await _alerts.raise(
+        patientId: patientId,
+        patientName: patient.fullName,
+        barangay: patient.barangay,
+        type: AlertsService.typeAtRisk,
+        trigger: 'Glucose ${bloodGlucose.toInt()} mg/dL · '
+            'BP ${systolicBP.toInt()}/${diastolicBP.toInt()} mmHg',
+      );
+      await _alerts.resolve(patientId, AlertsService.typeCritical);
+    } else {
+      /* Back within range. Both close rather than vanish, so the record
+         that this patient was once flagged survives. */
+      await _alerts.resolve(patientId, AlertsService.typeCritical);
+      await _alerts.resolve(patientId, AlertsService.typeAtRisk);
     }
 
     await loadAll();
@@ -234,8 +269,24 @@ class AppProvider extends ChangeNotifier {
     return await _db.isDuplicatePatient(firstName, lastName, birthDate, excludeId);
   }
 
+  /// Acknowledging travels to the shared store, so the RHU sees it too.
   Future<void> markNotificationRead(String id) async {
-    await _db.markNotificationRead(id);
+    final alert = _notifications.firstWhere(
+      (n) => n.id == id,
+      orElse: () => NotificationModel(
+        id: id, patientId: '', patientName: '', type: 'high_risk',
+        message: '', isRead: true, createdAt: DateTime.now(),
+      ),
+    );
+
+    if (alert.patientId.isNotEmpty) {
+      await _alerts.acknowledge(
+        alert.patientId,
+        alert.type == 'no_visit' ? AlertsService.typeNoVisit : AlertsService.typeCritical,
+        currentUser?.fullName ?? 'BHW',
+      );
+    }
+
     _notifications = _notifications.map((n) {
       if (n.id == id) return n.copyWith(isRead: true);
       return n;
@@ -244,7 +295,7 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<void> markAllNotificationsRead() async {
-    await _db.markAllNotificationsRead(currentUser!.id);
+    await _alerts.acknowledgeAll(_notifications, currentUser?.fullName ?? 'BHW');
     _notifications = _notifications.map((n) => n.copyWith(isRead: true)).toList();
     notifyListeners();
   }
@@ -252,6 +303,10 @@ class AppProvider extends ChangeNotifier {
   Future<bool> manualSync() async {
     final result = await _sync.manualSync(currentUser!.id);
     _lastSyncTime = await _sync.getLastSyncTime();
+
+    /* Reload from what the sync just pulled, so the screen reflects the
+       exchange rather than only saying it happened. */
+    if (result) await loadAll();
     if (result) {
       _allRecords = await _db.getAllRecordsByBhw(currentUser!.id);
     }
