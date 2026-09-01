@@ -301,7 +301,15 @@ class DatabaseHelper {
   }
 
   Future<List<HealthRecord>> getAllRecordsByBhw(String bhwId) async {
-    final snap = await _records.get();
+    /* Bounded. Every visit ever recorded in the municipality is not what
+       a dashboard showing recent activity and a 7-day overdue check need,
+       and fetching all of them gets slower every month the system is used.
+       Newest first, so the cap drops the oldest rather than an arbitrary
+       slice. */
+    final snap = await _records
+        .orderBy('visitDate', descending: true)
+        .limit(500)
+        .get();
     return snap.docs.map((d) => _toRecord(d.id, d.data())).toList()
       ..sort((a, b) => b.visitDate.compareTo(a.visitDate));
   }

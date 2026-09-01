@@ -90,7 +90,9 @@ class AppProvider extends ChangeNotifier {
     _patients = allPatients.where((p) => p.status == 'Approved').toList();
     _pendingPatients = allPatients.where((p) => p.status != 'Approved').toList();
     _allRecords = await _db.getAllRecordsByBhw(bhwId);
-    _totalRecordCount = await _db.getTotalRecordCountByBhw(bhwId);
+    /* _allRecords was just loaded; counting it costs nothing, where the
+       aggregation query was another round trip for the same number. */
+    _totalRecordCount = _allRecords.length;
     /* From the shared store, so an alert raised at the RHU - or by
        another BHW - appears here too, and one acknowledged anywhere is
        acknowledged everywhere. */
@@ -119,24 +121,41 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<void> _checkNoVisitAlerts(String bhwId) async {
+    /* This used to make two round trips per patient - a records query and
+       an alert read - one after another, and submitting a patient waited
+       for all of them. Twenty patients meant forty sequential calls, which
+       on a barangay connection is the difference between a button that
+       responds and one that appears stuck.
+
+       Every input is already in memory by the time this runs: _allRecords
+       was loaded a moment ago, and _notifications holds the open alerts.
+       Only a patient who is genuinely overdue costs a write. */
     final cutoff = DateTime.now().subtract(const Duration(days: AppConstants.noVisitDays));
+
+    /* Latest visit per patient, in one pass over the records already
+       loaded rather than a query each. */
+    final lastVisit = <String, DateTime>{};
+    for (final r in _allRecords) {
+      final seen = lastVisit[r.patientId];
+      if (seen == null || r.visitDate.isAfter(seen)) lastVisit[r.patientId] = r.visitDate;
+    }
+
+    /* Patients already carrying an open no-visit alert, from the list just
+       fetched, so nobody is flagged twice. */
+    final alreadyAlerted = _notifications
+        .where((n) => n.type == 'no_visit')
+        .map((n) => n.patientId)
+        .toSet();
+
     bool createdAny = false;
 
     for (final patient in _patients) {
-      final records = await _db.getRecordsByPatient(patient.id);
-      DateTime? lastVisit;
-      if (records.isNotEmpty) {
-        records.sort((a, b) => b.visitDate.compareTo(a.visitDate));
-        lastVisit = records.first.visitDate;
-      }
-
-      final isOverdue = lastVisit == null || lastVisit.isBefore(cutoff);
+      final seen = lastVisit[patient.id];
+      final isOverdue = seen == null || seen.isBefore(cutoff);
       if (!isOverdue) continue;
+      if (alreadyAlerted.contains(patient.id)) continue;
 
-      final alreadyAlerted = await _alerts.hasOpenNoVisit(patient.id);
-      if (alreadyAlerted) continue;
-
-      final message = lastVisit == null
+      final message = seen == null
           ? '${patient.fullName} has no recorded visits yet.'
           : '${patient.fullName} has not been visited in ${AppConstants.noVisitDays}+ days.';
 
