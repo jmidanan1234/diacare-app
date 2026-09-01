@@ -79,6 +79,34 @@ class SyncService {
   /// change. It only reports when data last actually reached the server.
   Future<void> syncIfOnline(String bhwId) async {}
 
+  /// Pushes what is queued on this device, without pulling anything.
+  ///
+  /// For actions that are themselves a request to send: submitting a
+  /// patient for approval, or filing a visit. Manual sync is about not
+  /// chattering in the background, not about holding on to work the
+  /// worker has just pressed a button to submit - a registration that
+  /// sits in a local queue looks submitted on the phone and does not
+  /// exist at the health unit, which is the worst of both.
+  ///
+  /// Returns false when it could not reach the server; the work stays
+  /// queued and the next Sync Now sends it.
+  Future<bool> pushNow() async {
+    if (!await isOnline) return false;
+
+    try {
+      await _db.enableNetwork();
+      await _db.waitForPendingWrites().timeout(const Duration(seconds: 20));
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_keyLastSync, DateTime.now().toIso8601String());
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      await goManual();
+    }
+  }
+
   /// The Sync Now button, and the only thing that moves data.
   ///
   /// Enables the network, waits for everything queued on this device to be

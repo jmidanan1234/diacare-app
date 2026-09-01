@@ -256,12 +256,26 @@ class AppProvider extends ChangeNotifier {
       await _alerts.resolve(patientId, AlertsService.typeAtRisk);
     }
 
+    /* Same reasoning as a registration: filing a visit is an act of
+       submitting it. */
+    await _sync.pushNow();
+    _lastSyncTime = await _sync.getLastSyncTime();
+
     await loadAll();
     return riskLevel;
   }
 
   Future<void> addPatient(Patient patient) async {
     await _db.insertPatient(patient);
+
+    /* Submitting for approval is a request to send, so it is pushed now
+       rather than waiting for the next Sync Now. Firestore accepts a
+       write into its local cache and reports success immediately, so
+       without this the registration looked submitted on the phone while
+       the health unit had never seen it. */
+    await _sync.pushNow();
+    _lastSyncTime = await _sync.getLastSyncTime();
+
     await loadAll();
   }
 

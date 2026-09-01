@@ -179,24 +179,30 @@ class DatabaseHelper {
         'source': 'app',
       };
 
-  /// Approved patients across the whole RHU, not just this worker's own.
+  /// Approved patients registered through the app, from any BHW.
   ///
-  /// The bhwId argument is kept so the callers did not have to change, but
-  /// it no longer narrows anything: a worker covering for a colleague, or
-  /// meeting a patient from the next purok, needs the record that already
-  /// exists rather than starting a second one for the same person.
+  /// Deliberately one-way. A patient every BHW registers is shared with
+  /// every other BHW and with the RHU, but a patient encoded at the health
+  /// unit stays there: those are walk-ins and RHU records, not households
+  /// anyone is assigned to visit, and putting them in a field worker's list
+  /// would be a round of visits nobody asked for.
+  ///
+  /// The bhwId argument is kept so the callers did not have to change; it
+  /// no longer narrows anything.
   Future<List<Patient>> getPatientsByBhw(String bhwId) async {
     final snap = await _patients
+        .where('source', isEqualTo: 'app')
         .where('status', isEqualTo: 'approved')
         .get();
     return snap.docs.map((d) => _toPatient(d.id, d.data())).toList()
       ..sort((a, b) => a.lastName.compareTo(b.lastName));
   }
 
-  /// Every patient in the register, including ones still awaiting the
-  /// nurse's review.
+  /// Every app-registered patient, including ones still awaiting the
+  /// nurse's review. RHU-encoded patients are excluded for the same reason
+  /// as above.
   Future<List<Patient>> getAllPatientsByBhw(String bhwId) async {
-    final snap = await _patients.get();
+    final snap = await _patients.where('source', isEqualTo: 'app').get();
     return snap.docs.map((d) => _toPatient(d.id, d.data())).toList()
       ..sort((a, b) => a.lastName.compareTo(b.lastName));
   }
@@ -233,10 +239,12 @@ class DatabaseHelper {
     DateTime birthDate,
     String excludeId,
   ) async {
-    // Across the whole register now, not just this worker's own patients.
-    // With a shared roster, the duplicate that matters is the one someone
-    // else already registered.
+    // Across every app registration, whoever made it - with a shared
+    // roster the duplicate that matters is the one another worker already
+    // entered. RHU-encoded patients are not compared: the app cannot see
+    // them, so flagging a clash against one would be unexplainable.
     final snap = await _patients
+        .where('source', isEqualTo: 'app')
         .where('firstName', isEqualTo: firstName)
         .where('lastName', isEqualTo: lastName)
         .get();
