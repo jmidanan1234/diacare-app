@@ -4,8 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'firebase_options.dart';
 import 'providers/app_provider.dart';
 import 'services/auth_service.dart';
 import 'services/fcm_service.dart';
@@ -17,16 +15,9 @@ import 'screens/force_change_password_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Firestore is the app's store now, so this has to succeed before
-  // anything reads data. Awaited rather than fired off: a screen that
-  // queried Firestore before initialization would fail in a way that
-  // reads like a missing record rather than a missing setup step.
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
-
-  // Push notifications are still best-effort. They are for
-  // BHN-originated alerts, and the app is fully usable without them.
+  // No-ops safely until a real Firebase project is wired up — see the
+  // setup notes in services/fcm_service.dart. Local notifications (used
+  // for on-device risk/no-visit alerts) work independently of this.
   unawaited(FCMService().init());
 
   // Lock to portrait orientation

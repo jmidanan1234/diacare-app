@@ -1,5 +1,4 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'local_notification_service.dart';
 
@@ -14,13 +13,20 @@ import 'local_notification_service.dart';
 /// is for alerts that originate on the server and need to reach a specific
 /// BHW's phone — it cannot function offline or before a backend exists.
 ///
-/// Firebase is initialised in main() now, so this no longer does it. The
-/// device token is stored on the signed-in worker's profile, which is where
-/// the RHU backend can find it when it needs to reach a specific phone.
+/// ── Setup required before this will work ──────────────────────────────
+/// 1. Create a Firebase project and register this app (Android package
+///    name: see android/app/build.gradle.kts `applicationId`).
+/// 2. Run `flutterfire configure` from the project root — this generates
+///    `lib/firebase_options.dart`, which does not exist yet in this draft.
+/// 3. Uncomment the `Firebase.initializeApp(options: ...)` line below once
+///    that file exists.
+/// 4. The backend will need each user's FCM token (see [token] /
+///    [onTokenRefresh]) to target pushes — send it to `POST /auth/login`
+///    or a dedicated `PUT /users/:id/fcm-token` endpoint once it exists.
 ///
-/// Still best-effort: push is a convenience on top of the on-device alerts,
-/// and a worker who declines the permission, or has no Play Services, keeps
-/// a fully working app.
+/// Until then, [init] no-ops safely so the rest of the app is unaffected —
+/// call it from main() same as today; it simply won't register for push
+/// until the steps above are completed.
 class FCMService {
   static final FCMService _instance = FCMService._internal();
   factory FCMService() => _instance;
@@ -37,18 +43,23 @@ class FCMService {
     _initialized = true;
 
     try {
-      // main() already called Firebase.initializeApp with the real
-      // options; calling it again here would either duplicate the app or
-      // initialise it without them.
+      // TODO: once `flutterfire configure` has been run, switch to:
+      //   await Firebase.initializeApp(
+      //     options: DefaultFirebaseOptions.currentPlatform,
+      //   );
+      // and import 'package:diacare/firebase_options.dart'.
+      await Firebase.initializeApp();
+
       _messaging = FirebaseMessaging.instance;
       await _messaging!.requestPermission(alert: true, badge: true, sound: true);
 
       _token = await _messaging!.getToken();
-      await _publishToken(_token);
+      // TODO: send _token to the backend once POST /auth/login (or a
+      // dedicated endpoint) exists, so the server knows where to push.
 
       _messaging!.onTokenRefresh.listen((newToken) {
         _token = newToken;
-        _publishToken(newToken);
+        // TODO: re-send the refreshed token to the backend.
       });
 
       // Foreground messages: FCM doesn't show a system tray notification
@@ -72,36 +83,9 @@ class FCMService {
         }
       });
     } catch (e) {
-      // A declined permission, a device without Play Services, or no
-      // network. Push is an extra on top of the on-device alerts, so the
-      // app carries on without it rather than failing to start.
+      // Expected until `flutterfire configure` has been run for this
+      // project — fail silently so local notifications and the rest of
+      // the app continue to work normally.
     }
   }
-
-  /// Writes the device token onto the worker's profile so the backend can
-  /// target this phone. Called again on refresh, because a token that
-  /// silently rotates is a phone the health unit can no longer reach.
-  ///
-  /// Skipped when nobody is signed in: init() runs at startup, before the
-  /// login screen, and there is no profile to write to yet. The refresh
-  /// listener catches it afterwards.
-  Future<void> _publishToken(String? token) async {
-    if (token == null || token.isEmpty) return;
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) return;
-
-    try {
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({
-        'fcmToken': token,
-        'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),
-      });
-    } catch (_) {
-      // Not worth surfacing: the app works without push, and the token is
-      // rewritten on the next refresh.
-    }
-  }
-
-  /// Called after sign-in, when there is finally a profile to attach the
-  /// token to.
-  Future<void> publishTokenForCurrentUser() => _publishToken(_token);
 }

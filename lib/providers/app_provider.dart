@@ -8,7 +8,6 @@ import '../models/user_model.dart';
 import '../services/auth_service.dart';
 import '../services/risk_classifier.dart';
 import '../services/sync_service.dart';
-import '../services/alerts_service.dart';
 import '../services/local_notification_service.dart';
 import '../utils/constants.dart';
 
@@ -17,7 +16,6 @@ class AppProvider extends ChangeNotifier {
   final _auth = AuthService();
   final _sync = SyncService();
   final _localNotif = LocalNotificationService();
-  final _alerts = AlertsService();
   final _uuid = const Uuid();
 
   List<Patient> _patients = [];
@@ -26,10 +24,6 @@ class AppProvider extends ChangeNotifier {
   int _totalRecordCount = 0;
   List<NotificationModel> _notifications = [];
   String? _lastSyncTime;
-
-  /// Firestore starts online so the first load can fill the cache; after
-  /// that the app is manual-only. See loadAll.
-  bool _wentManual = false;
   bool _isLoading = false;
   int _selectedTab = 0;
   /// Set by a dashboard summary card tap, consumed once by PatientListScreen
@@ -89,26 +83,9 @@ class AppProvider extends ChangeNotifier {
     final allPatients = await _db.getAllPatientsByBhw(bhwId);
     _patients = allPatients.where((p) => p.status == 'Approved').toList();
     _pendingPatients = allPatients.where((p) => p.status != 'Approved').toList();
-    /* Records and alerts exist for RHU-encoded patients too, and the app
-       deliberately does not show those patients. Left unfiltered, their
-       readings appeared in Health Records as "Unknown patient" - a visit
-       with real vitals and nobody attached to it, which is worse than not
-       showing it at all.
-
-       Filtered against the patients this app can actually see, so every
-       row can name who it is about. */
-    final visible = allPatients.map((p) => p.id).toSet();
-
-    final everyRecord = await _db.getAllRecordsByBhw(bhwId);
-    _allRecords = everyRecord.where((r) => visible.contains(r.patientId)).toList();
-    _totalRecordCount = _allRecords.length;
-
-    /* From the shared store, so an alert raised at the RHU - or by
-       another BHW - appears here too, and one acknowledged anywhere is
-       acknowledged everywhere. Same filter, for the same reason: an
-       alert about a patient this app cannot open is not actionable. */
-    final everyAlert = await _alerts.fetchAll();
-    _notifications = everyAlert.where((n) => visible.contains(n.patientId)).toList();
+    _allRecords = await _db.getAllRecordsByBhw(bhwId);
+    _totalRecordCount = await _db.getTotalRecordCountByBhw(bhwId);
+    _notifications = await _db.getNotificationsByBhw(bhwId);
     _lastSyncTime = await _sync.getLastSyncTime();
 
     _isLoading = false;
@@ -118,72 +95,54 @@ class AppProvider extends ChangeNotifier {
     // previously this only ever existed in seed data, never generated.
     await _checkNoVisitAlerts(bhwId);
 
-    /* Syncing is manual now, so nothing is started here. Firestore's
-       network is switched off after the first load: the app works from
-       its local cache, and Sync Now on the Profile screen is the only
-       thing that exchanges data with the health unit.
-
-       Done once, after the data is on screen - disabling before the
-       first load would leave a freshly installed app with an empty
-       cache and no way to fill it. */
-    if (!_wentManual) {
-      _wentManual = true;
-      await _sync.goManual();
-    }
+    // Background sync
+    _sync.syncIfOnline(bhwId).then((_) async {
+      _lastSyncTime = await _sync.getLastSyncTime();
+      // Reload records so any that just got marked synced update their
+      // badge immediately, without waiting for the next manual refresh.
+      _allRecords = await _db.getAllRecordsByBhw(bhwId);
+      notifyListeners();
+    });
   }
 
   Future<void> _checkNoVisitAlerts(String bhwId) async {
-    /* This used to make two round trips per patient - a records query and
-       an alert read - one after another, and submitting a patient waited
-       for all of them. Twenty patients meant forty sequential calls, which
-       on a barangay connection is the difference between a button that
-       responds and one that appears stuck.
-
-       Every input is already in memory by the time this runs: _allRecords
-       was loaded a moment ago, and _notifications holds the open alerts.
-       Only a patient who is genuinely overdue costs a write. */
     final cutoff = DateTime.now().subtract(const Duration(days: AppConstants.noVisitDays));
-
-    /* Latest visit per patient, in one pass over the records already
-       loaded rather than a query each. */
-    final lastVisit = <String, DateTime>{};
-    for (final r in _allRecords) {
-      final seen = lastVisit[r.patientId];
-      if (seen == null || r.visitDate.isAfter(seen)) lastVisit[r.patientId] = r.visitDate;
-    }
-
-    /* Patients already carrying an open no-visit alert, from the list just
-       fetched, so nobody is flagged twice. */
-    final alreadyAlerted = _notifications
-        .where((n) => n.type == 'no_visit')
-        .map((n) => n.patientId)
-        .toSet();
-
     bool createdAny = false;
 
     for (final patient in _patients) {
-      final seen = lastVisit[patient.id];
-      final isOverdue = seen == null || seen.isBefore(cutoff);
-      if (!isOverdue) continue;
-      if (alreadyAlerted.contains(patient.id)) continue;
+      final records = await _db.getRecordsByPatient(patient.id);
+      DateTime? lastVisit;
+      if (records.isNotEmpty) {
+        records.sort((a, b) => b.visitDate.compareTo(a.visitDate));
+        lastVisit = records.first.visitDate;
+      }
 
-      final message = seen == null
+      final isOverdue = lastVisit == null || lastVisit.isBefore(cutoff);
+      if (!isOverdue) continue;
+
+      final alreadyAlerted = await _db.hasActiveNoVisitNotification(patient.id);
+      if (alreadyAlerted) continue;
+
+      final message = lastVisit == null
           ? '${patient.fullName} has no recorded visits yet.'
           : '${patient.fullName} has not been visited in ${AppConstants.noVisitDays}+ days.';
 
-      await _alerts.raise(
+      final notif = NotificationModel(
+        id: _uuid.v4(),
         patientId: patient.id,
         patientName: patient.fullName,
-        barangay: patient.barangay,
-        type: AlertsService.typeNoVisit,
-        trigger: message,
+        type: 'no_visit',
+        message: message,
+        isRead: false,
+        createdAt: DateTime.now(),
       );
+      await _db.insertNotification(notif);
       await _localNotif.showNoVisitAlert(patientName: patient.fullName, message: message);
       createdAny = true;
     }
 
     if (createdAny) {
-      _notifications = await _alerts.fetchAll();
+      _notifications = await _db.getNotificationsByBhw(bhwId);
       notifyListeners();
     }
   }
@@ -230,14 +189,12 @@ class AppProvider extends ChangeNotifier {
       updatedAt: now,
     );
 
-    await _sync.submit(() async {
-      await _db.insertHealthRecord(record);
-      await _db.updatePatientRisk(patientId, riskLevel);
-    });
+    await _db.insertHealthRecord(record);
+    await _db.updatePatientRisk(patientId, riskLevel);
     // A visit was just logged, so any earlier "not visited in 7+ days"
     // alert for this patient is now stale — clear it rather than leaving
     // it sitting in Notifications claiming the patient still hasn't been seen.
-    await _alerts.resolve(patientId, AlertsService.typeNoVisit);
+    await _db.resolveNoVisitNotifications(patientId);
 
     // Create notification if high risk
     if (riskLevel == AppConstants.riskHigh) {
@@ -257,54 +214,19 @@ class AppProvider extends ChangeNotifier {
         isRead: false,
         createdAt: now,
       );
-      /* Written to the shared store, so the RHU sees this reading was
-         critical without waiting for anyone to report it. */
-      await _alerts.raise(
-        patientId: patientId,
-        patientName: patient.fullName,
-        barangay: patient.barangay,
-        type: AlertsService.typeCritical,
-        trigger: notif.message,
-      );
-      await _alerts.resolve(patientId, AlertsService.typeAtRisk);
+      await _db.insertNotification(notif);
       await _localNotif.showHighRiskAlert(
         patientName: patient.fullName,
         message: notif.message,
       );
-    } else if (riskLevel == AppConstants.riskModerate) {
-      final patient = _patients.firstWhere((p) => p.id == patientId);
-      await _alerts.raise(
-        patientId: patientId,
-        patientName: patient.fullName,
-        barangay: patient.barangay,
-        type: AlertsService.typeAtRisk,
-        trigger: 'Glucose ${bloodGlucose.toInt()} mg/dL · '
-            'BP ${systolicBP.toInt()}/${diastolicBP.toInt()} mmHg',
-      );
-      await _alerts.resolve(patientId, AlertsService.typeCritical);
-    } else {
-      /* Back within range. Both close rather than vanish, so the record
-         that this patient was once flagged survives. */
-      await _alerts.resolve(patientId, AlertsService.typeCritical);
-      await _alerts.resolve(patientId, AlertsService.typeAtRisk);
     }
-
-    _lastSyncTime = await _sync.getLastSyncTime();
 
     await loadAll();
     return riskLevel;
   }
 
   Future<void> addPatient(Patient patient) async {
-    /* Submitting for approval is a request to send, so the write goes to
-       the server now rather than waiting for the next Sync Now.
-
-       submit() owns the awaiting, because a Firestore write only
-       completes once the server has it: awaiting one with the network
-       off hangs forever, which is exactly what the submit button did. */
-    await _sync.submit(() => _db.insertPatient(patient));
-    _lastSyncTime = await _sync.getLastSyncTime();
-
+    await _db.insertPatient(patient);
     await loadAll();
   }
 
@@ -312,24 +234,8 @@ class AppProvider extends ChangeNotifier {
     return await _db.isDuplicatePatient(firstName, lastName, birthDate, excludeId);
   }
 
-  /// Acknowledging travels to the shared store, so the RHU sees it too.
   Future<void> markNotificationRead(String id) async {
-    final alert = _notifications.firstWhere(
-      (n) => n.id == id,
-      orElse: () => NotificationModel(
-        id: id, patientId: '', patientName: '', type: 'high_risk',
-        message: '', isRead: true, createdAt: DateTime.now(),
-      ),
-    );
-
-    if (alert.patientId.isNotEmpty) {
-      await _alerts.acknowledge(
-        alert.patientId,
-        alert.type == 'no_visit' ? AlertsService.typeNoVisit : AlertsService.typeCritical,
-        currentUser?.fullName ?? 'BHW',
-      );
-    }
-
+    await _db.markNotificationRead(id);
     _notifications = _notifications.map((n) {
       if (n.id == id) return n.copyWith(isRead: true);
       return n;
@@ -338,7 +244,7 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<void> markAllNotificationsRead() async {
-    await _alerts.acknowledgeAll(_notifications, currentUser?.fullName ?? 'BHW');
+    await _db.markAllNotificationsRead(currentUser!.id);
     _notifications = _notifications.map((n) => n.copyWith(isRead: true)).toList();
     notifyListeners();
   }
@@ -346,10 +252,6 @@ class AppProvider extends ChangeNotifier {
   Future<bool> manualSync() async {
     final result = await _sync.manualSync(currentUser!.id);
     _lastSyncTime = await _sync.getLastSyncTime();
-
-    /* Reload from what the sync just pulled, so the screen reflects the
-       exchange rather than only saying it happened. */
-    if (result) await loadAll();
     if (result) {
       _allRecords = await _db.getAllRecordsByBhw(currentUser!.id);
     }

@@ -1,472 +1,653 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart';
 import '../models/patient.dart';
 import '../models/health_record.dart';
+import '../models/user_model.dart';
 import '../models/notification_model.dart';
 import '../utils/constants.dart';
 
-/// The app's data layer, backed by Firestore.
-///
-/// This was a SQLite database. That kept the app usable without signal,
-/// which matters in the barangays — but it also meant a household visit
-/// existed only on the phone that recorded it. The RHU dashboard could not
-/// see it, and a phone that broke took the records with it.
-///
-/// Firestore replaces it rather than sitting alongside it. Its own offline
-/// cache covers the same ground: reads are served locally without a
-/// connection, and writes queue on the device and go out when signal
-/// returns. So the offline-first behaviour survives while the records
-/// become visible at the health unit.
-///
-/// The class name and every method signature are unchanged, so the screens
-/// and AppProvider did not have to be rewritten to follow this.
-///
-/// Field names match what the dashboard writes, because both halves now
-/// read the same documents — see shared/patients-schema.js on the web side.
 class DatabaseHelper {
   static final DatabaseHelper _instance = DatabaseHelper._internal();
+  static Database? _database;
+
   factory DatabaseHelper() => _instance;
   DatabaseHelper._internal();
 
-  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  Future<Database> get database async {
+    _database ??= await _initDatabase();
+    return _database!;
+  }
 
-  /// Firestore rejects a query it cannot prove satisfies the rules, even
-  /// when every document it would return is allowed. A rule that says
-  /// "only your own records" therefore requires the query to say so too —
-  /// filtering by owner is not an optimisation here, it is what makes the
-  /// read legal at all.
-  String get _uid => FirebaseAuth.instance.currentUser?.uid ?? '';
+  Future<Database> _initDatabase() async {
+    final path = join(await getDatabasesPath(), AppConstants.dbName);
+    return await openDatabase(
+      path,
+      version: AppConstants.dbVersion,
+      onCreate: _onCreate,
+      // Dev-time convenience: since this app has not shipped yet, upgrades
+      // simply rebuild the schema from scratch. Replace with real column
+      // migrations (ALTER TABLE) before any real field data exists.
+      onUpgrade: (db, oldVersion, newVersion) async {
+        await db.execute('DROP TABLE IF EXISTS notifications');
+        await db.execute('DROP TABLE IF EXISTS health_records');
+        await db.execute('DROP TABLE IF EXISTS patients');
+        await db.execute('DROP TABLE IF EXISTS users');
+        await _onCreate(db, newVersion);
+      },
+    );
+  }
 
-  CollectionReference<Map<String, dynamic>> get _patients =>
-      _db.collection('patients');
-  CollectionReference<Map<String, dynamic>> get _records =>
-      _db.collection('health_records');
-  CollectionReference<Map<String, dynamic>> get _notifications =>
-      _db.collection('notifications');
+  Future<void> _onCreate(Database db, int version) async {
+    // Users table
+    await db.execute('''
+      CREATE TABLE users (
+        id TEXT PRIMARY KEY,
+        firstName TEXT NOT NULL,
+        lastName TEXT NOT NULL,
+        username TEXT NOT NULL UNIQUE,
+        passwordHash TEXT NOT NULL,
+        salt TEXT NOT NULL,
+        role TEXT NOT NULL,
+        barangay TEXT NOT NULL,
+        purok TEXT NOT NULL,
+        isActive INTEGER NOT NULL DEFAULT 1,
+        mustChangePassword INTEGER NOT NULL DEFAULT 0,
+        createdAt TEXT NOT NULL,
+        photoPath TEXT
+      )
+    ''');
 
-  /// Firestore hands back a Timestamp; a document written moments ago on
-  /// this device still holds what was put in it, and a half-filled record
-  /// may hold nothing at all.
-  static DateTime _date(dynamic value, {DateTime? fallback}) {
-    if (value is Timestamp) return value.toDate();
-    if (value is DateTime) return value;
-    if (value is String) {
-      final parsed = DateTime.tryParse(value);
-      if (parsed != null) return parsed;
+    // Patients table
+    await db.execute('''
+      CREATE TABLE patients (
+        id TEXT PRIMARY KEY,
+        firstName TEXT NOT NULL,
+        lastName TEXT NOT NULL,
+        middleName TEXT,
+        birthDate TEXT NOT NULL,
+        sex TEXT NOT NULL,
+        address TEXT NOT NULL,
+        barangay TEXT NOT NULL,
+        purok TEXT NOT NULL,
+        contactNumber TEXT,
+        diabetesType TEXT NOT NULL,
+        diagnosisDate TEXT,
+        medications TEXT,
+        attendingPhysician TEXT,
+        emergencyContact TEXT,
+        emergencyContactNumber TEXT,
+        assignedBhwId TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'Pending Approval',
+        riskLevel TEXT NOT NULL DEFAULT 'Normal',
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL,
+        isSynced INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+
+    // Health records table
+    await db.execute('''
+      CREATE TABLE health_records (
+        id TEXT PRIMARY KEY,
+        patientId TEXT NOT NULL,
+        bhwId TEXT NOT NULL,
+        bloodGlucose REAL NOT NULL,
+        systolicBP REAL NOT NULL,
+        diastolicBP REAL NOT NULL,
+        bmi REAL NOT NULL,
+        medAdherence TEXT NOT NULL DEFAULT 'taken',
+        insulinUse INTEGER NOT NULL DEFAULT 0,
+        medicationName TEXT,
+        dosage TEXT,
+        observations TEXT,
+        riskLevel TEXT NOT NULL,
+        visitDate TEXT NOT NULL,
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL,
+        isSynced INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (patientId) REFERENCES patients (id)
+      )
+    ''');
+
+    // Notifications table
+    await db.execute('''
+      CREATE TABLE notifications (
+        id TEXT PRIMARY KEY,
+        patientId TEXT NOT NULL,
+        patientName TEXT NOT NULL,
+        type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        isRead INTEGER NOT NULL DEFAULT 0,
+        createdAt TEXT NOT NULL
+      )
+    ''');
+
+    // Insert demo BHW account
+    await _insertDemoData(db);
+  }
+
+  Future<void> _insertDemoData(Database db) async {
+    // Demo BHW account (password: bhw1234)
+    // Hash = SHA-256(password + salt). See AuthService for the hashing logic.
+    await db.insert('users', {
+      'id': 'bhw-001',
+      'firstName': 'Maria',
+      'lastName': 'Santos',
+      'username': 'bhw.santos',
+      'passwordHash':
+          '842874c1bd7147eab84b6ebbe57fb79a86c88731d3a91c8ae82ac86d516aa63f',
+      'salt': 'a1b2c3d4e5f6',
+      'role': 'BHW',
+      'barangay': 'Barangay San Jose',
+      'purok': 'Purok 3',
+      'isActive': 1,
+      // Demo account skips the forced change so graders can log in immediately.
+      // Real BHN-provisioned accounts should be created with this set to 1.
+      'mustChangePassword': 0,
+      'createdAt': DateTime.now().toIso8601String(),
+    });
+
+    // Second demo account: simulates a BHW freshly provisioned by the BHN
+    // with a temporary password. Username: bhw.reyes / temp password: temp1234
+    // On first login this account is forced into the "set your own password" flow.
+    await db.insert('users', {
+      'id': 'bhw-002',
+      'firstName': 'Carlos',
+      'lastName': 'Reyes',
+      'username': 'bhw.reyes',
+      'passwordHash':
+          '74fb666e7245b0994d87740b1114b3681202c93027ec6ce8053204570998f785', // sha256('temp1234' + salt)
+      'salt': 'f1e2d3c4b5a6',
+      'role': 'BHW',
+      'barangay': 'Barangay Sto. Domingo',
+      'purok': 'Purok 1',
+      'isActive': 1,
+      'mustChangePassword': 1,
+      'createdAt': DateTime.now().toIso8601String(),
+    });
+
+    // Demo patients
+    final now = DateTime.now();
+    final patients = [
+      {
+        'id': 'pat-001',
+        'firstName': 'Juan',
+        'lastName': 'Dela Cruz',
+        'middleName': 'Reyes',
+        'birthDate': '1965-04-12',
+        'sex': 'Male',
+        'address': '123 Sampaguita St., Purok 3',
+        'barangay': 'Barangay San Jose',
+        'purok': 'Purok 3',
+        'contactNumber': '09171234567',
+        'diabetesType': 'Type 2',
+        'diagnosisDate': '2019-06-01',
+        'medications': 'Metformin 500mg',
+        'attendingPhysician': 'Dr. Reyes',
+        'emergencyContact': 'Ana Dela Cruz',
+        'emergencyContactNumber': '09181234567',
+        'assignedBhwId': 'bhw-001',
+        'status': 'Approved',
+        'riskLevel': 'Highly At Risk',
+        'createdAt': now.toIso8601String(),
+        'updatedAt': now.toIso8601String(),
+        'isSynced': 1,
+      },
+      {
+        'id': 'pat-002',
+        'firstName': 'Lourdes',
+        'lastName': 'Gomez',
+        'middleName': null,
+        'birthDate': '1972-09-25',
+        'sex': 'Female',
+        'address': '45 Rosal St., Purok 3',
+        'barangay': 'Barangay San Jose',
+        'purok': 'Purok 3',
+        'contactNumber': '09191234567',
+        'diabetesType': 'Type 2',
+        'diagnosisDate': '2021-03-15',
+        'medications': 'Glipizide 5mg',
+        'attendingPhysician': null,
+        'emergencyContact': 'Pedro Gomez',
+        'emergencyContactNumber': '09201234567',
+        'assignedBhwId': 'bhw-001',
+        'status': 'Approved',
+        'riskLevel': 'At Risk',
+        'createdAt': now.toIso8601String(),
+        'updatedAt': now.toIso8601String(),
+        'isSynced': 1,
+      },
+      {
+        'id': 'pat-003',
+        'firstName': 'Roberto',
+        'lastName': 'Villanueva',
+        'middleName': 'Cruz',
+        'birthDate': '1958-01-30',
+        'sex': 'Male',
+        'address': '89 Ilang-Ilang Ave., Purok 3',
+        'barangay': 'Barangay San Jose',
+        'purok': 'Purok 3',
+        'contactNumber': '09261234567',
+        'diabetesType': 'Type 2',
+        'diagnosisDate': '2017-11-20',
+        'medications': 'Insulin Glargine',
+        'attendingPhysician': 'Dr. Lim',
+        'emergencyContact': 'Cecilia Villanueva',
+        'emergencyContactNumber': '09271234567',
+        'assignedBhwId': 'bhw-001',
+        'status': 'Approved',
+        'riskLevel': 'Normal',
+        'createdAt': now.toIso8601String(),
+        'updatedAt': now.toIso8601String(),
+        'isSynced': 1,
+      },
+    ];
+
+    for (final p in patients) {
+      await db.insert('patients', p);
     }
-    return fallback ?? DateTime.now();
-  }
 
-  static DateTime? _dateOrNull(dynamic value) {
-    if (value == null) return null;
-    if (value is Timestamp) return value.toDate();
-    if (value is DateTime) return value;
-    if (value is String) return DateTime.tryParse(value);
-    return null;
-  }
+    // Demo health records
+    final records = [
+      {
+        'id': 'rec-001',
+        'patientId': 'pat-001',
+        'bhwId': 'bhw-001',
+        'bloodGlucose': 220.0,
+        'systolicBP': 145.0,
+        'diastolicBP': 92.0,
+        'bmi': 28.5,
+        'medAdherence': 'missed',
+        'insulinUse': 1,
+        'medicationName': 'Insulin Glargine',
+        'dosage': '10 units, once daily (evening)',
+        'observations': 'Patient appears fatigued. Missed medication for 3 days.',
+        'riskLevel': 'Highly At Risk',
+        'visitDate': now.subtract(const Duration(days: 2)).toIso8601String(),
+        'createdAt': now.subtract(const Duration(days: 2)).toIso8601String(),
+        'updatedAt': now.subtract(const Duration(days: 2)).toIso8601String(),
+        'isSynced': 1,
+      },
+      {
+        'id': 'rec-002',
+        'patientId': 'pat-001',
+        'bhwId': 'bhw-001',
+        'bloodGlucose': 185.0,
+        'systolicBP': 138.0,
+        'diastolicBP': 88.0,
+        'bmi': 28.5,
+        'medAdherence': 'taken',
+        'insulinUse': 1,
+        'medicationName': 'Insulin Glargine',
+        'dosage': '10 units, once daily (evening)',
+        'observations': 'Slight improvement noted.',
+        'riskLevel': 'At Risk',
+        'visitDate': now.subtract(const Duration(days: 10)).toIso8601String(),
+        'createdAt': now.subtract(const Duration(days: 10)).toIso8601String(),
+        'updatedAt': now.subtract(const Duration(days: 10)).toIso8601String(),
+        'isSynced': 1,
+      },
+      {
+        'id': 'rec-003',
+        'patientId': 'pat-002',
+        'bhwId': 'bhw-001',
+        'bloodGlucose': 160.0,
+        'systolicBP': 133.0,
+        'diastolicBP': 85.0,
+        'bmi': 26.1,
+        'medAdherence': 'taken',
+        'insulinUse': 0,
+        'medicationName': 'Glipizide',
+        'dosage': '5mg, once daily (morning)',
+        'observations': 'Stable condition.',
+        'riskLevel': 'At Risk',
+        'visitDate': now.subtract(const Duration(days: 5)).toIso8601String(),
+        'createdAt': now.subtract(const Duration(days: 5)).toIso8601String(),
+        'updatedAt': now.subtract(const Duration(days: 5)).toIso8601String(),
+        'isSynced': 1,
+      },
+      {
+        'id': 'rec-004',
+        'patientId': 'pat-003',
+        'bhwId': 'bhw-001',
+        'bloodGlucose': 115.0,
+        'systolicBP': 118.0,
+        'diastolicBP': 76.0,
+        'bmi': 23.8,
+        'medAdherence': 'taken',
+        'insulinUse': 0,
+        'medicationName': 'Metformin',
+        'dosage': '500mg, twice daily',
+        'observations': 'Patient doing well.',
+        'riskLevel': 'Normal',
+        'visitDate': now.subtract(const Duration(days: 3)).toIso8601String(),
+        'createdAt': now.subtract(const Duration(days: 3)).toIso8601String(),
+        'updatedAt': now.subtract(const Duration(days: 3)).toIso8601String(),
+        'isSynced': 1,
+      },
+    ];
 
-  static double _num(dynamic value) =>
-      value is num ? value.toDouble() : double.tryParse('$value') ?? 0;
-
-  /* ================================================================
-     VOCABULARY
-
-     The two halves grew up apart and name the same things differently:
-     the app says Approved and Highly At Risk, the dashboard stores
-     approved and critical, and firestore.rules compares against the
-     stored form. A BHW registration written with the app's spelling is
-     rejected outright.
-
-     Translating here means neither side had to be rewritten and there is
-     one place to look when they disagree again. The stored form wins,
-     because it is what the rules and the dashboard already read.
-     ================================================================ */
-
-  /// Returns the app's own constants rather than copies of them. Spelling
-  /// them out here meant two sources for the same word: statusPending is
-  /// 'Pending Approval', and a literal 'Pending' matched it only because
-  /// nothing compared the two directly.
-  static String _statusToApp(String? stored) {
-    switch ((stored ?? '').toLowerCase()) {
-      case 'approved':
-        return AppConstants.statusApproved;
-      case 'inactive':
-        return AppConstants.statusInactive;
-      default:
-        return AppConstants.statusPending;
+    for (final r in records) {
+      await db.insert('health_records', r);
     }
+
+    // Demo notifications
+    await db.insert('notifications', {
+      'id': 'notif-001',
+      'patientId': 'pat-001',
+      'patientName': 'Juan Dela Cruz',
+      'type': 'high_risk',
+      'message': 'Juan Dela Cruz has been classified as HIGH RISK. Immediate follow-up recommended.',
+      'isRead': 0,
+      'createdAt': now.subtract(const Duration(days: 2)).toIso8601String(),
+    });
+
+    await db.insert('notifications', {
+      'id': 'notif-002',
+      'patientId': 'pat-001',
+      'patientName': 'Juan Dela Cruz',
+      'type': 'no_visit',
+      'message': 'Juan Dela Cruz has not been visited in over 7 days.',
+      'isRead': 0,
+      'createdAt': now.subtract(const Duration(days: 1)).toIso8601String(),
+    });
   }
 
-  static String _statusToStored(String appStatus) {
-    if (appStatus == AppConstants.statusApproved) return 'approved';
-    if (appStatus == AppConstants.statusInactive) return 'inactive';
-    return 'pending';
+  // ==================== USER ====================
+  Future<UserModel?> getUserByUsername(String username) async {
+    final db = await database;
+    final maps = await db.query('users', where: 'username = ?', whereArgs: [username]);
+    if (maps.isEmpty) return null;
+    return UserModel.fromMap(maps.first);
   }
 
-  static String _riskToApp(String? stored) {
-    switch ((stored ?? '').toLowerCase()) {
-      case 'critical':
-        return AppConstants.riskHigh;
-      case 'warning':
-        return AppConstants.riskModerate;
-      default:
-        return AppConstants.riskNormal;
-    }
+  Future<UserModel?> getUserById(String id) async {
+    final db = await database;
+    final maps = await db.query('users', where: 'id = ?', whereArgs: [id]);
+    if (maps.isEmpty) return null;
+    return UserModel.fromMap(maps.first);
   }
 
-  static String _riskToStored(String appRisk) {
-    if (appRisk == AppConstants.riskHigh) return 'critical';
-    if (appRisk == AppConstants.riskModerate) return 'warning';
-    return 'normal';
+  /// Updates the stored hash + salt, and clears mustChangePassword (used both
+  /// for voluntary password changes and the forced first-login change).
+  Future<bool> updatePassword(String userId, String newPasswordHash, String newSalt) async {
+    final db = await database;
+    final count = await db.update(
+      'users',
+      {
+        'passwordHash': newPasswordHash,
+        'salt': newSalt,
+        'mustChangePassword': 0,
+      },
+      where: 'id = ?',
+      whereArgs: [userId],
+    );
+    return count > 0;
   }
 
+  /// [photoPath] is null to clear the photo (revert to initials avatar).
+  Future<bool> updateUserPhoto(String userId, String? photoPath) async {
+    final db = await database;
+    final count = await db.update(
+      'users',
+      {'photoPath': photoPath},
+      where: 'id = ?',
+      whereArgs: [userId],
+    );
+    return count > 0;
+  }
 
-  /* ================================================================
-     PATIENTS
-     ================================================================ */
-
-  Patient _toPatient(String id, Map<String, dynamic> d) => Patient(
-        id: id,
-        firstName: d['firstName'] as String? ?? '',
-        lastName: d['lastName'] as String? ?? '',
-        middleName: d['middleName'] as String?,
-        birthDate: _date(d['birthDate']),
-        sex: d['sex'] as String? ?? '',
-        address: d['address'] as String? ?? '',
-        barangay: d['barangay'] as String? ?? '',
-        purok: d['purok'] as String? ?? '',
-        contactNumber: d['contactNumber'] as String?,
-        diabetesType: d['diabetesType'] as String? ?? '',
-        diagnosisDate: _dateOrNull(d['diagnosisDate']),
-        medications: d['medications'] as String?,
-        attendingPhysician: d['attendingPhysician'] as String?,
-        emergencyContact: d['emergencyContact'] as String?,
-        emergencyContactNumber: d['emergencyContactNumber'] as String?,
-        assignedBhwId: d['assignedBhwId'] as String? ?? '',
-        status: _statusToApp(d['status'] as String?),
-        riskLevel: _riskToApp(d['riskLevel'] as String?),
-        createdAt: _date(d['createdAt']),
-        updatedAt: _date(d['updatedAt']),
-        // Everything read back from Firestore has reached the server, or is
-        // a local write still queued — either way the app no longer tracks
-        // sync state itself. Firestore's own metadata says whether a
-        // document is still pending.
-        isSynced: true,
-      );
-
-  Map<String, dynamic> _fromPatient(Patient p) => {
-        'firstName': p.firstName,
-        'lastName': p.lastName,
-        'middleName': p.middleName ?? '',
-        'birthDate': Timestamp.fromDate(p.birthDate),
-        'sex': p.sex,
-        'address': p.address,
-        'barangay': p.barangay,
-        'purok': p.purok,
-        'contactNumber': p.contactNumber ?? '',
-        'diabetesType': p.diabetesType,
-        'diagnosisDate':
-            p.diagnosisDate == null ? null : Timestamp.fromDate(p.diagnosisDate!),
-        'medications': p.medications ?? '',
-        'attendingPhysician': p.attendingPhysician ?? '',
-        'emergencyContact': p.emergencyContact ?? '',
-        'emergencyContactNumber': p.emergencyContactNumber ?? '',
-        'assignedBhwId': p.assignedBhwId,
-        'status': _statusToStored(p.status),
-        'riskLevel': _riskToStored(p.riskLevel),
-        'createdAt': Timestamp.fromDate(p.createdAt),
-        'updatedAt': FieldValue.serverTimestamp(),
-        'source': 'app',
-      };
-
-  /// Approved patients registered through the app, from any BHW.
-  ///
-  /// Deliberately one-way. A patient every BHW registers is shared with
-  /// every other BHW and with the RHU, but a patient encoded at the health
-  /// unit stays there: those are walk-ins and RHU records, not households
-  /// anyone is assigned to visit, and putting them in a field worker's list
-  /// would be a round of visits nobody asked for.
-  ///
-  /// The bhwId argument is kept so the callers did not have to change; it
-  /// no longer narrows anything.
+  // ==================== PATIENTS ====================
   Future<List<Patient>> getPatientsByBhw(String bhwId) async {
-    final snap = await _patients
-        .where('source', isEqualTo: 'app')
-        .where('status', isEqualTo: 'approved')
-        .get();
-    return snap.docs.map((d) => _toPatient(d.id, d.data())).toList()
-      ..sort((a, b) => a.lastName.compareTo(b.lastName));
+    final db = await database;
+    final maps = await db.query(
+      'patients',
+      where: 'assignedBhwId = ? AND status = ?',
+      whereArgs: [bhwId, 'Approved'],
+      orderBy: 'lastName ASC',
+    );
+    return maps.map((m) => Patient.fromMap(m)).toList();
   }
 
-  /// Every app-registered patient, including ones still awaiting the
-  /// nurse's review. RHU-encoded patients are excluded for the same reason
-  /// as above.
+  /// Returns every patient a BHW has submitted, regardless of approval
+  /// status — used so a BHW can see patients still awaiting BHN approval
+  /// instead of them silently disappearing after submission.
   Future<List<Patient>> getAllPatientsByBhw(String bhwId) async {
-    final snap = await _patients.where('source', isEqualTo: 'app').get();
-    return snap.docs.map((d) => _toPatient(d.id, d.data())).toList()
-      ..sort((a, b) => a.lastName.compareTo(b.lastName));
+    final db = await database;
+    final maps = await db.query(
+      'patients',
+      where: 'assignedBhwId = ?',
+      whereArgs: [bhwId],
+      orderBy: 'createdAt DESC',
+    );
+    return maps.map((m) => Patient.fromMap(m)).toList();
   }
 
   Future<Patient?> getPatientById(String id) async {
-    final snap = await _patients.doc(id).get();
-    final data = snap.data();
-    return data == null ? null : _toPatient(snap.id, data);
+    final db = await database;
+    final maps = await db.query('patients', where: 'id = ?', whereArgs: [id]);
+    if (maps.isEmpty) return null;
+    return Patient.fromMap(maps.first);
   }
 
   Future<void> insertPatient(Patient patient) async {
-    // The rules require a BHW's own uid and a pending status; a worker
-    // approving their own registration would make the nurse's review
-    // meaningless.
-    await _patients.doc(patient.id).set(_fromPatient(patient));
+    final db = await database;
+    await db.insert('patients', patient.toMap(), conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<void> updatePatient(Patient patient) async {
-    await _patients.doc(patient.id).update(_fromPatient(patient));
+    final db = await database;
+    await db.update('patients', patient.toMap(), where: 'id = ?', whereArgs: [patient.id]);
   }
 
   Future<void> updatePatientRisk(String patientId, String riskLevel) async {
-    await _patients.doc(patientId).update({
-      'riskLevel': _riskToStored(riskLevel),
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
+    final db = await database;
+    await db.update(
+      'patients',
+      {'riskLevel': riskLevel, 'updatedAt': DateTime.now().toIso8601String()},
+      where: 'id = ?',
+      whereArgs: [patientId],
+    );
   }
 
-  /// Two people with the same name and birth date in one barangay is almost
-  /// always the same person entered twice.
-  Future<bool> isDuplicatePatient(
-    String firstName,
-    String lastName,
-    DateTime birthDate,
-    String excludeId,
-  ) async {
-    // Across every app registration, whoever made it - with a shared
-    // roster the duplicate that matters is the one another worker already
-    // entered. RHU-encoded patients are not compared: the app cannot see
-    // them, so flagging a clash against one would be unexplainable.
-    final snap = await _patients
-        .where('source', isEqualTo: 'app')
-        .where('firstName', isEqualTo: firstName)
-        .where('lastName', isEqualTo: lastName)
-        .get();
-
-    return snap.docs.any((d) {
-      if (d.id == excludeId) return false;
-      final other = _date(d.data()['birthDate']);
-      return other.year == birthDate.year &&
-          other.month == birthDate.month &&
-          other.day == birthDate.day;
-    });
+  Future<bool> isDuplicatePatient(String firstName, String lastName, DateTime birthDate, String excludeId) async {
+    final db = await database;
+    final maps = await db.query(
+      'patients',
+      where: "firstName = ? AND lastName = ? AND birthDate = ? AND id != ?",
+      whereArgs: [firstName, lastName, birthDate.toIso8601String(), excludeId],
+    );
+    return maps.isNotEmpty;
   }
 
-  /* ================================================================
-     HEALTH RECORDS
-     ================================================================ */
-
-  HealthRecord _toRecord(String id, Map<String, dynamic> d) => HealthRecord(
-        id: id,
-        patientId: d['patientId'] as String? ?? '',
-        bhwId: d['bhwId'] as String? ?? '',
-        bloodGlucose: _num(d['bloodGlucose']),
-        systolicBP: _num(d['systolicBP']),
-        diastolicBP: _num(d['diastolicBP']),
-        bmi: _num(d['bmi']),
-        medAdherence: d['medAdherence'] as String? ?? 'taken',
-        insulinUse: d['insulinUse'] == true,
-        medicationName: d['medicationName'] as String?,
-        dosage: d['dosage'] as String?,
-        observations: d['observations'] as String?,
-        riskLevel: _riskToApp(d['riskLevel'] as String?),
-        visitDate: _date(d['visitDate']),
-        createdAt: _date(d['createdAt']),
-        updatedAt: _date(d['updatedAt']),
-        isSynced: true,
-      );
-
+  // ==================== HEALTH RECORDS ====================
   Future<List<HealthRecord>> getRecordsByPatient(String patientId) async {
-    // The patient's whole history, whoever recorded it - another BHW, or
-    // a nurse at the RHU. A shared patient list whose readings were still
-    // private would show a patient with no history at all.
-    final snap =
-        await _records.where('patientId', isEqualTo: patientId).get();
-    return snap.docs.map((d) => _toRecord(d.id, d.data())).toList()
-      ..sort((a, b) => b.visitDate.compareTo(a.visitDate));
+    final db = await database;
+    final maps = await db.query(
+      'health_records',
+      where: 'patientId = ?',
+      whereArgs: [patientId],
+      orderBy: 'visitDate DESC',
+    );
+    return maps.map((m) => HealthRecord.fromMap(m)).toList();
   }
 
-  Future<List<HealthRecord>> getRecentRecordsByBhw(
-    String bhwId, {
-    int limit = 10,
-  }) async {
-    final all = await getAllRecordsByBhw(bhwId);
-    return all.take(limit).toList();
+  Future<List<HealthRecord>> getRecentRecordsByBhw(String bhwId, {int limit = 10}) async {
+    final db = await database;
+    final maps = await db.query(
+      'health_records',
+      where: 'bhwId = ?',
+      whereArgs: [bhwId],
+      orderBy: 'visitDate DESC',
+      limit: limit,
+    );
+    return maps.map((m) => HealthRecord.fromMap(m)).toList();
   }
 
+  /// Every record for this BHW, unlimited — used anywhere the app needs a
+  /// genuinely complete picture (the Records tab, "last visit" on the
+  /// Patient List, and the "not visited in 7+ days" calculation). The
+  /// capped [getRecentRecordsByBhw] is only safe for a small preview
+  /// widget (e.g. Dashboard's 5-item activity feed) — using it for
+  /// anything else silently drops older records once a BHW's total
+  /// crosses the cap, which starts producing wrong answers well before
+  /// they reach 50 patients.
   Future<List<HealthRecord>> getAllRecordsByBhw(String bhwId) async {
-    /* Bounded. Every visit ever recorded in the municipality is not what
-       a dashboard showing recent activity and a 7-day overdue check need,
-       and fetching all of them gets slower every month the system is used.
-       Newest first, so the cap drops the oldest rather than an arbitrary
-       slice. */
-    final snap = await _records
-        .orderBy('visitDate', descending: true)
-        .limit(500)
-        .get();
-    return snap.docs.map((d) => _toRecord(d.id, d.data())).toList()
-      ..sort((a, b) => b.visitDate.compareTo(a.visitDate));
+    final db = await database;
+    final maps = await db.query(
+      'health_records',
+      where: 'bhwId = ?',
+      whereArgs: [bhwId],
+      orderBy: 'visitDate DESC',
+    );
+    return maps.map((m) => HealthRecord.fromMap(m)).toList();
   }
 
+  /// True total count of health records logged by this BHW — unlike
+  /// [getRecentRecordsByBhw], this is not capped, so it's safe to use for
+  /// stats/summary displays (e.g. Profile screen "Records" count).
   Future<int> getTotalRecordCountByBhw(String bhwId) async {
-    final snap = await _records.count().get();
-    return snap.count ?? 0;
+    final db = await database;
+    final result = await db.rawQuery(
+      'SELECT COUNT(*) as count FROM health_records WHERE bhwId = ?',
+      [bhwId],
+    );
+    return (result.first['count'] as int?) ?? 0;
+  }
+
+  /// Marks every one of this BHW's unsynced records as synced. Called by
+  /// [SyncService] once a sync "completes" — this is the piece that was
+  /// actually missing before: the sync flow updated a last-synced
+  /// timestamp but never touched the isSynced flag on individual records,
+  /// so the app couldn't honestly tell a BHW which records had gone out.
+  /// Once a real backend exists, this should only run after a confirmed
+  /// server acknowledgment, not as part of the local-only simulation.
+  Future<void> markAllRecordsSynced(String bhwId) async {
+    final db = await database;
+    await db.update(
+      'health_records',
+      {'isSynced': 1},
+      where: 'bhwId = ? AND isSynced = 0',
+      whereArgs: [bhwId],
+    );
   }
 
   Future<HealthRecord?> getLatestRecordByPatient(String patientId) async {
-    final all = await getRecordsByPatient(patientId);
-    return all.isEmpty ? null : all.first;
+    final db = await database;
+    final maps = await db.query(
+      'health_records',
+      where: 'patientId = ?',
+      whereArgs: [patientId],
+      orderBy: 'visitDate DESC',
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return HealthRecord.fromMap(maps.first);
   }
 
   Future<void> insertHealthRecord(HealthRecord record) async {
-    await _records.doc(record.id).set({
-      'patientId': record.patientId,
-      // Who took the reading.
-      'bhwId': record.bhwId,
-      // Who follows this patient. The rules read this rather than bhwId,
-      // so a visit encoded at the RHU still appears in this worker's
-      // history for the same patient.
-      'assignedBhwId': record.bhwId,
-      'bloodGlucose': record.bloodGlucose,
-      'systolicBP': record.systolicBP,
-      'diastolicBP': record.diastolicBP,
-      'bmi': record.bmi,
-      'medAdherence': record.medAdherence,
-      'insulinUse': record.insulinUse,
-      'medicationName': record.medicationName ?? '',
-      'dosage': record.dosage ?? '',
-      'observations': record.observations ?? '',
-      'riskLevel': _riskToStored(record.riskLevel),
-      'visitDate': Timestamp.fromDate(record.visitDate),
-      'createdAt': Timestamp.fromDate(record.createdAt),
-      'updatedAt': FieldValue.serverTimestamp(),
-      // The dashboard shows this as "Household Visit" rather than an RHU
-      // one, which is the distinction a nurse reading the history needs.
-      'source': 'app',
-      'referral': 'none',
-    });
+    final db = await database;
+    await db.insert('health_records', record.toMap(), conflictAlgorithm: ConflictAlgorithm.replace);
   }
-
-  /* ================================================================
-     COUNTS
-     ================================================================ */
 
   Future<int> countHighRiskPatients(String bhwId) async {
-    final patients = await getPatientsByBhw(bhwId);
-    return patients.where((p) => p.riskLevel == 'Highly At Risk').length;
+    final db = await database;
+    final result = await db.rawQuery(
+      "SELECT COUNT(*) as count FROM patients WHERE assignedBhwId = ? AND riskLevel = 'Highly At Risk' AND status = 'Approved'",
+      [bhwId],
+    );
+    return Sqflite.firstIntValue(result) ?? 0;
   }
 
-  /// Patients with no visit in [days] — the ones quietly falling out of
-  /// monitoring, which is what this whole system exists to catch.
   Future<int> countUnvisitedPatients(String bhwId, int days) async {
-    final patients = await getPatientsByBhw(bhwId);
-    final records = await getAllRecordsByBhw(bhwId);
-    final cutoff = DateTime.now().subtract(Duration(days: days));
-
-    final lastVisit = <String, DateTime>{};
-    for (final r in records) {
-      final seen = lastVisit[r.patientId];
-      if (seen == null || r.visitDate.isAfter(seen)) {
-        lastVisit[r.patientId] = r.visitDate;
-      }
-    }
-
-    return patients.where((p) {
-      final seen = lastVisit[p.id];
-      // Never visited counts: that is the most overdue case there is.
-      return seen == null || seen.isBefore(cutoff);
-    }).length;
+    final db = await database;
+    final cutoff = DateTime.now().subtract(Duration(days: days)).toIso8601String();
+    // Patients with no record or last visit > days ago
+    final result = await db.rawQuery('''
+      SELECT COUNT(*) as count FROM patients p
+      WHERE p.assignedBhwId = ? AND p.status = 'Approved'
+      AND (
+        NOT EXISTS (SELECT 1 FROM health_records r WHERE r.patientId = p.id)
+        OR (SELECT MAX(r2.visitDate) FROM health_records r2 WHERE r2.patientId = p.id) < ?
+      )
+    ''', [bhwId, cutoff]);
+    return Sqflite.firstIntValue(result) ?? 0;
   }
 
-  /* ================================================================
-     NOTIFICATIONS
-
-     On-device alerts raised by the app itself (a high reading, a patient
-     not seen in a while). They belong to one worker, so they are keyed by
-     bhwId like everything else.
-     ================================================================ */
-
-  NotificationModel _toNotification(String id, Map<String, dynamic> d) =>
-      NotificationModel(
-        id: id,
-        patientId: d['patientId'] as String? ?? '',
-        patientName: d['patientName'] as String? ?? '',
-        type: d['type'] as String? ?? 'high_risk',
-        message: d['message'] as String? ?? '',
-        isRead: d['isRead'] == true,
-        createdAt: _date(d['createdAt']),
-      );
-
+  // ==================== NOTIFICATIONS ====================
   Future<List<NotificationModel>> getNotificationsByBhw(String bhwId) async {
-    final snap =
-        await _notifications.where('bhwId', isEqualTo: bhwId).get();
-    return snap.docs.map((d) => _toNotification(d.id, d.data())).toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    // All notifications are for the logged-in BHW's patients
+    final db = await database;
+    final patients = await getPatientsByBhw(bhwId);
+    final patientIds = patients.map((p) => p.id).toList();
+    if (patientIds.isEmpty) return [];
+    final placeholders = patientIds.map((_) => '?').join(',');
+    final maps = await db.rawQuery(
+      'SELECT * FROM notifications WHERE patientId IN ($placeholders) ORDER BY createdAt DESC',
+      patientIds,
+    );
+    return maps.map((m) => NotificationModel.fromMap(m)).toList();
   }
 
   Future<int> countUnreadNotifications(String bhwId) async {
-    final all = await getNotificationsByBhw(bhwId);
-    return all.where((n) => !n.isRead).length;
+    final db = await database;
+    final patients = await getPatientsByBhw(bhwId);
+    final patientIds = patients.map((p) => p.id).toList();
+    if (patientIds.isEmpty) return 0;
+    final placeholders = patientIds.map((_) => '?').join(',');
+    final result = await db.rawQuery(
+      'SELECT COUNT(*) as count FROM notifications WHERE patientId IN ($placeholders) AND isRead = 0',
+      patientIds,
+    );
+    return Sqflite.firstIntValue(result) ?? 0;
   }
 
-  /// Stops the same "not seen in a while" alert being raised again every
-  /// time the app recalculates.
+  /// Prevents creating a new no_visit notification every single app launch —
+  /// only returns true if the patient already has an unread one pending.
   Future<bool> hasActiveNoVisitNotification(String patientId) async {
-    final snap = await _notifications
-        .where('bhwId', isEqualTo: _uid)
-        .where('patientId', isEqualTo: patientId)
-        .where('type', isEqualTo: 'no_visit')
-        .where('resolved', isEqualTo: false)
-        .limit(1)
-        .get();
-    return snap.docs.isNotEmpty;
+    final db = await database;
+    final result = await db.query(
+      'notifications',
+      where: 'patientId = ? AND type = ? AND isRead = 0',
+      whereArgs: [patientId, 'no_visit'],
+      limit: 1,
+    );
+    return result.isNotEmpty;
   }
 
   Future<void> insertNotification(NotificationModel notif) async {
-    await _notifications.doc(notif.id).set({
-      // NotificationModel has no bhwId of its own - these are raised on
-      // the device for whoever is signed in, so the owner is taken from
-      // the session rather than passed through every call site.
-      'bhwId': _uid,
-      'patientId': notif.patientId,
-      'patientName': notif.patientName,
-      'type': notif.type,
-      'message': notif.message,
-      'isRead': notif.isRead,
-      'resolved': false,
-      'createdAt': Timestamp.fromDate(notif.createdAt),
-    });
+    final db = await database;
+    await db.insert('notifications', notif.toMap(), conflictAlgorithm: ConflictAlgorithm.ignore);
   }
 
   Future<void> markNotificationRead(String id) async {
-    await _notifications.doc(id).update({'isRead': true});
+    final db = await database;
+    await db.update('notifications', {'isRead': 1}, where: 'id = ?', whereArgs: [id]);
   }
 
+  /// Marks any unread "not visited" alerts for this patient as read. Called
+  /// right after a new health record is logged — without this, an old
+  /// no_visit alert keeps showing as unread ("not visited in 7+ days") even
+  /// after the BHW just logged a fresh visit, which would look broken.
   Future<void> resolveNoVisitNotifications(String patientId) async {
-    final snap = await _notifications
-        .where('bhwId', isEqualTo: _uid)
-        .where('patientId', isEqualTo: patientId)
-        .where('type', isEqualTo: 'no_visit')
-        .where('resolved', isEqualTo: false)
-        .get();
-    for (final d in snap.docs) {
-      await d.reference.update({'resolved': true, 'isRead': true});
-    }
+    final db = await database;
+    await db.update(
+      'notifications',
+      {'isRead': 1},
+      where: 'patientId = ? AND type = ? AND isRead = 0',
+      whereArgs: [patientId, 'no_visit'],
+    );
   }
 
   Future<void> markAllNotificationsRead(String bhwId) async {
-    final snap = await _notifications
-        .where('bhwId', isEqualTo: bhwId)
-        .where('isRead', isEqualTo: false)
-        .get();
-    for (final d in snap.docs) {
-      await d.reference.update({'isRead': true});
-    }
+    final db = await database;
+    final patients = await getPatientsByBhw(bhwId);
+    final patientIds = patients.map((p) => p.id).toList();
+    if (patientIds.isEmpty) return;
+    final placeholders = patientIds.map((_) => '?').join(',');
+    await db.rawUpdate(
+      'UPDATE notifications SET isRead = 1 WHERE patientId IN ($placeholders)',
+      patientIds,
+    );
   }
 }

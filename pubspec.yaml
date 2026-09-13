@@ -10,6 +10,8 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.6
+  sqflite: ^2.3.3
+  path: ^1.9.0
   provider: ^6.1.2
   shared_preferences: ^2.3.2
   connectivity_plus: ^6.0.3
@@ -21,24 +23,8 @@ dependencies:
   google_fonts: ^6.2.1
   image_picker: ^1.1.2
   path_provider: ^2.1.6
-  # Firebase Cloud Messaging — for server/BHN-originated push alerts, once
-  # the backend exists. Local notifications (above) remain the channel for
-  # alerts generated entirely on-device (offline risk classification).
-  # Requires running `flutterfire configure` to generate
-  # lib/firebase_options.dart before this will initialize successfully —
-  # see the comment in lib/services/fcm_service.dart.
   firebase_core: ^3.6.0
   firebase_messaging: ^15.1.3
-  # Firestore is the store now, replacing sqflite. Its own offline cache
-  # keeps the app usable without signal - the reason SQLite was chosen -
-  # while making the same records visible to the RHU dashboard, which a
-  # device-local database never could.
-  cloud_firestore: ^5.4.4
-  # A BHW signs in with a username, so the password is checked by
-  # /api/bhw-login and this exchanges the custom token it returns for a
-  # real Firebase identity.
-  firebase_auth: ^5.3.1
-  http: ^1.2.2
 
 dev_dependencies:
   # Generates the Android launcher icons from assets/images/logo.png into
