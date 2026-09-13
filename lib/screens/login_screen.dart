@@ -85,7 +85,7 @@ class _LoginScreenState extends State<LoginScreen> {
     } else {
       setState(() {
         _isLoading = false;
-        _errorMessage = 'Invalid username or password.';
+        _errorMessage = auth.lastError ?? 'Invalid username or password.';
       });
     }
   }

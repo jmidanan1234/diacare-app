@@ -368,6 +368,15 @@ class DatabaseHelper {
     return UserModel.fromMap(maps.first);
   }
 
+  Future<void> upsertUser(UserModel user) async {
+    final db = await database;
+    await db.insert(
+      'users',
+      user.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
   /// Updates the stored hash + salt, and clears mustChangePassword (used both
   /// for voluntary password changes and the forced first-login change).
   Future<bool> updatePassword(String userId, String newPasswordHash, String newSalt) async {
@@ -529,6 +538,77 @@ class DatabaseHelper {
       {'isSynced': 1},
       where: 'bhwId = ? AND isSynced = 0',
       whereArgs: [bhwId],
+    );
+  }
+
+  Future<List<Patient>> getUnsyncedPatients(String bhwId) async {
+    final db = await database;
+    final maps = await db.query(
+      'patients',
+      where: 'assignedBhwId = ? AND isSynced = 0',
+      whereArgs: [bhwId],
+    );
+    return maps.map((m) => Patient.fromMap(m)).toList();
+  }
+
+  Future<List<HealthRecord>> getUnsyncedRecords(String bhwId) async {
+    final db = await database;
+    final maps = await db.query(
+      'health_records',
+      where: 'bhwId = ? AND isSynced = 0',
+      whereArgs: [bhwId],
+    );
+    return maps.map((m) => HealthRecord.fromMap(m)).toList();
+  }
+
+  Future<int> getUnsyncedCount(String bhwId) async {
+    final db = await database;
+    final pRes = await db.rawQuery(
+      'SELECT COUNT(*) as c FROM patients WHERE assignedBhwId = ? AND isSynced = 0',
+      [bhwId],
+    );
+    final rRes = await db.rawQuery(
+      'SELECT COUNT(*) as c FROM health_records WHERE bhwId = ? AND isSynced = 0',
+      [bhwId],
+    );
+    final pCount = (pRes.first['c'] as int?) ?? 0;
+    final rCount = (rRes.first['c'] as int?) ?? 0;
+    return pCount + rCount;
+  }
+
+  Future<void> markPatientSynced(String patientId) async {
+    final db = await database;
+    await db.update(
+      'patients',
+      {'isSynced': 1},
+      where: 'id = ?',
+      whereArgs: [patientId],
+    );
+  }
+
+  Future<void> markRecordSynced(String recordId) async {
+    final db = await database;
+    await db.update(
+      'health_records',
+      {'isSynced': 1},
+      where: 'id = ?',
+      whereArgs: [recordId],
+    );
+  }
+
+  Future<void> upsertPatientFromRemote(Patient patient) async {
+    final db = await database;
+    final existing = await getPatientById(patient.id);
+    if (existing != null && !existing.isSynced) {
+      // Retain pending local changes if any
+      return;
+    }
+    final map = patient.toMap();
+    map['isSynced'] = 1;
+    await db.insert(
+      'patients',
+      map,
+      conflictAlgorithm: ConflictAlgorithm.replace,
     );
   }
 

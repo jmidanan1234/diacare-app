@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
 import 'providers/app_provider.dart';
 import 'services/auth_service.dart';
 import 'services/fcm_service.dart';
@@ -15,9 +17,14 @@ import 'screens/force_change_password_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // No-ops safely until a real Firebase project is wired up — see the
-  // setup notes in services/fcm_service.dart. Local notifications (used
-  // for on-device risk/no-visit alerts) work independently of this.
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  } catch (_) {
+    // App runs in offline mode backed by SQLite
+  }
+
   unawaited(FCMService().init());
 
   // Lock to portrait orientation

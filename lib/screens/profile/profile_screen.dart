@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../models/user_model.dart';
@@ -202,17 +203,44 @@ class ProfileScreen extends StatelessWidget {
                     _SettingsTile(
                       icon: Icons.sync_rounded,
                       title: 'Manual Sync',
-                      subtitle: provider.lastSyncTime != null
-                          ? 'Last synced: ${DateFormat('MMM d, y • hh:mm a').format(DateTime.parse(provider.lastSyncTime!))}'
-                          : 'Never synced',
-                      trailing: const Icon(Icons.chevron_right, size: 20, color: AppColors.textSecondary),
+                      subtitle: provider.unsyncedCount > 0
+                          ? '${provider.unsyncedCount} pending record(s) • Tap to sync'
+                          : (provider.lastSyncTime != null
+                              ? 'Last synced: ${DateFormat('MMM d, y • hh:mm a').format(DateTime.parse(provider.lastSyncTime!))}'
+                              : 'Never synced'),
+                      trailing: provider.unsyncedCount > 0
+                          ? Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: AppColors.warning.withValues(alpha: 0.18),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                '${provider.unsyncedCount} pending',
+                                style: GoogleFonts.inter(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  color: AppColors.textPrimary,
+                                ),
+                              ),
+                            )
+                          : const Icon(
+                              Icons.chevron_right,
+                              size: 20,
+                              color: AppColors.textSecondary,
+                            ),
                       onTap: () async {
-                        final synced = await provider.manualSync();
+                        final result = await provider.syncAll();
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
-                              content: Text(synced ? 'Sync completed successfully.' : 'No internet connection. Sync skipped.'),
-                              backgroundColor: synced ? AppColors.success : AppColors.warning,
+                              content: Text(result.message),
+                              backgroundColor: result.success
+                                  ? AppColors.success
+                                  : AppColors.warning,
                             ),
                           );
                         }

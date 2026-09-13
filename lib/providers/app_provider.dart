@@ -22,10 +22,13 @@ class AppProvider extends ChangeNotifier {
   List<Patient> _pendingPatients = [];
   List<HealthRecord> _allRecords = [];
   int _totalRecordCount = 0;
+  int _unsyncedCount = 0;
   List<NotificationModel> _notifications = [];
   String? _lastSyncTime;
   bool _isLoading = false;
   int _selectedTab = 0;
+
+  int get unsyncedCount => _unsyncedCount;
   /// Set by a dashboard summary card tap, consumed once by PatientListScreen
   /// on its next build so the destination tab opens pre-filtered.
   String? _pendingPatientListFilter;
@@ -85,6 +88,7 @@ class AppProvider extends ChangeNotifier {
     _pendingPatients = allPatients.where((p) => p.status != 'Approved').toList();
     _allRecords = await _db.getAllRecordsByBhw(bhwId);
     _totalRecordCount = await _db.getTotalRecordCountByBhw(bhwId);
+    _unsyncedCount = await _db.getUnsyncedCount(bhwId);
     _notifications = await _db.getNotificationsByBhw(bhwId);
     _lastSyncTime = await _sync.getLastSyncTime();
 
@@ -94,15 +98,6 @@ class AppProvider extends ChangeNotifier {
     // Scan for patients overdue for a visit and raise real alerts —
     // previously this only ever existed in seed data, never generated.
     await _checkNoVisitAlerts(bhwId);
-
-    // Background sync
-    _sync.syncIfOnline(bhwId).then((_) async {
-      _lastSyncTime = await _sync.getLastSyncTime();
-      // Reload records so any that just got marked synced update their
-      // badge immediately, without waiting for the next manual refresh.
-      _allRecords = await _db.getAllRecordsByBhw(bhwId);
-      notifyListeners();
-    });
   }
 
   Future<void> _checkNoVisitAlerts(String bhwId) async {
@@ -249,13 +244,17 @@ class AppProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<SyncResult> syncAll() async {
+    final result = await _sync.syncAll(currentUser!.id);
+    _lastSyncTime = await _sync.getLastSyncTime();
+    await loadAll();
+    return result;
+  }
+
   Future<bool> manualSync() async {
     final result = await _sync.manualSync(currentUser!.id);
     _lastSyncTime = await _sync.getLastSyncTime();
-    if (result) {
-      _allRecords = await _db.getAllRecordsByBhw(currentUser!.id);
-    }
-    notifyListeners();
+    await loadAll();
     return result;
   }
 

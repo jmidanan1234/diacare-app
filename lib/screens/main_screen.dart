@@ -1,14 +1,25 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/app_provider.dart';
+import '../services/sync_service.dart';
+import '../widgets/sync_prompt_dialog.dart';
 import 'dashboard/dashboard_screen.dart';
 import 'patients/patient_list_screen.dart';
 import 'records/records_screen.dart';
 import 'notifications/notifications_screen.dart';
 import 'profile/profile_screen.dart';
 
-class MainScreen extends StatelessWidget {
+class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
+
+  @override
+  State<MainScreen> createState() => _MainScreenState();
+}
+
+class _MainScreenState extends State<MainScreen> {
+  StreamSubscription<bool>? _connectivitySub;
+  bool _promptShowing = false;
 
   static const _screens = [
     DashboardScreen(),
@@ -17,6 +28,34 @@ class MainScreen extends StatelessWidget {
     NotificationsScreen(),
     ProfileScreen(),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _connectivitySub = SyncService().onConnectivityRestored.listen((_) {
+      _checkAndPromptSync();
+    });
+  }
+
+  @override
+  void dispose() {
+    _connectivitySub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _checkAndPromptSync() async {
+    if (!mounted || _promptShowing) return;
+    final provider = context.read<AppProvider>();
+    final bhwId = provider.currentUser?.id;
+    if (bhwId == null) return;
+
+    final count = await SyncService().getUnsyncedCount(bhwId);
+    if (count > 0 && mounted) {
+      _promptShowing = true;
+      await SyncPromptDialog.show(context, count);
+      _promptShowing = false;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -30,7 +69,11 @@ class MainScreen extends StatelessWidget {
           bottomNavigationBar: Container(
             decoration: const BoxDecoration(
               boxShadow: [
-                BoxShadow(color: Color(0x15000000), blurRadius: 12, offset: Offset(0, -3)),
+                BoxShadow(
+                  color: Color(0x15000000),
+                  blurRadius: 12,
+                  offset: Offset(0, -3),
+                ),
               ],
             ),
             child: BottomNavigationBar(
