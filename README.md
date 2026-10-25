@@ -1,5 +1,11 @@
 # 🩺 DiaCare — Barangay Diabetes Monitoring App
 
+[![Download APK](https://img.shields.io/badge/Download-APK%20(v1.0.0)-059669?style=for-the-badge&logo=android&logoColor=white)](https://github.com/jmidanan1234/diacare-app/releases/download/v1.0.0/diacare-app.apk)
+[![GitHub Release](https://img.shields.io/github/v/release/jmidanan1234/diacare-app?style=for-the-badge&color=0f766e)](https://github.com/jmidanan1234/diacare-app/releases/latest)
+
+> 📲 **Download Android APK**: [**Click here to download `diacare-app.apk` (Release v1.0.0)**](https://github.com/jmidanan1234/diacare-app/releases/download/v1.0.0/diacare-app.apk)  
+> *Or view the full [GitHub Releases](https://github.com/jmidanan1234/diacare-app/releases/latest) page.*
+
 A Flutter-based mobile application for Barangay Health Workers (BHW) to monitor Type 2 Diabetes patients in their assigned Purok. Built with an offline-first architecture and Material Design 3 UI.
 
 ---
