@@ -9,16 +9,6 @@ import '../../utils/theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/shared_widgets.dart';
 
-/// Purok is often entered as just a number ("4"), which is confusing when
-/// shown on its own. Anything that starts with a digit and doesn't already
-/// say "purok" is displayed as "Purok 4"; text entries are left untouched.
-String _purokLabel(String? purok) {
-  final p = (purok ?? '').trim();
-  if (p.isEmpty) return 'No purok';
-  if (p.toLowerCase().contains('purok')) return p;
-  if (RegExp(r'^\d').hasMatch(p)) return 'Purok $p';
-  return p;
-}
 
 enum MedAdherence { taken, partial, missed }
 
@@ -87,6 +77,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   bool _heightFromLastVisit = false;
 
   bool get _isEdit => widget.existingRecord != null;
+  bool get _isFromPatientProfile => !_isEdit && widget.preselectedPatient != null;
 
   /// 120.0 -> "120", 98.6 -> "98.6"
   String _fmt(double v) =>
@@ -98,18 +89,21 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     return MedAdherence.taken;
   }
 
-  /// Which patient the form opens on. In correction mode this is always the
-  /// record's own patient (so the result dialog never shows the wrong name),
-  /// otherwise the preselected one, otherwise the first in the list.
-  /// Null only if the list is empty.
+  /// Which patient the form opens on.
+  /// - In correction mode: the record's own patient.
+  /// - Coming from patient profile: the preselected patient.
+  /// - Coming from Records tab: null (no patient preselected, user picks one).
   Patient? _resolveInitialPatient() {
     final r = widget.existingRecord;
     if (r != null) {
+      if (widget.preselectedPatient != null && widget.preselectedPatient!.id == r.patientId) {
+        return widget.preselectedPatient;
+      }
       for (final p in widget.patients) {
         if (p.id == r.patientId) return p;
       }
     }
-    return widget.preselectedPatient ?? widget.patients.firstOrNull;
+    return widget.preselectedPatient;
   }
 
   /// Switching patients must not carry the previous patient's readings over.
@@ -221,7 +215,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     _heightController.addListener(_computeBmi);
     _weightController.addListener(_computeBmi);
 
-    if (!_isEdit) {
+    if (!_isEdit && _selectedPatient != null) {
       _prefillFromLastVisit();
     }
   }
@@ -303,14 +297,23 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   }
 
   Future<void> _submit() async {
+    final patient = _selectedPatient;
+    if (patient == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please select a patient first.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
     if (!_formKey.currentState!.validate()) {
       // Show the red error text (done by validate()) AND bring the first
       // missing field into view so the BHW doesn't have to hunt for it.
       _scrollToFirstError();
       return;
     }
-    final patient = _selectedPatient;
-    if (patient == null) return;
 
     setState(() => _isLoading = true);
 
@@ -473,57 +476,60 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
               // ── Patient ──────────────────────────────────────────────
               _SectionCard(
                 title: 'Patient',
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _PatientPickerField(
-                      selected: _selectedPatient,
-                      patients: widget.patients,
-                      // A correction always belongs to the same patient.
-                      enabled: !_isEdit,
-                      onChanged: (p) {
-                        if (p.id == _selectedPatient?.id) return;
-                        setState(() => _selectedPatient = p);
-                        _resetForNewPatient();
-                        _prefillFromLastVisit();
-                      },
-                    ),
-                    if (_selectedPatient != null) ...[
-                      const SizedBox(height: 8),
-                      Row(
+                child: _isFromPatientProfile && _selectedPatient != null
+                    ? _PatientSummaryCard(patient: _selectedPatient!)
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Expanded(
-                            child: Text(
-                              '${_selectedPatient!.age} yrs • ${_selectedPatient!.sex} • ${_selectedPatient!.diabetesType}',
-                              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
-                              overflow: TextOverflow.ellipsis,
-                            ),
+                          _PatientPickerField(
+                            selected: _selectedPatient,
+                            patients: widget.patients,
+                            // A correction always belongs to the same patient.
+                            enabled: !_isEdit,
+                            onChanged: (p) {
+                              if (p.id == _selectedPatient?.id) return;
+                              setState(() => _selectedPatient = p);
+                              _resetForNewPatient();
+                              _prefillFromLastVisit();
+                            },
                           ),
-                          const SizedBox(width: 8),
-                          RiskBadge(riskLevel: _selectedPatient!.riskLevel, compact: true),
+                          if (_selectedPatient != null) ...[
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    '${_selectedPatient!.age} yrs • ${_selectedPatient!.sex} • ${_selectedPatient!.diabetesType}',
+                                    style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                RiskBadge(riskLevel: _selectedPatient!.riskLevel, compact: true),
+                              ],
+                            ),
+                            if (_selectedPatient!.medications != null &&
+                                _selectedPatient!.medications!.trim().isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Icon(Icons.medication_outlined,
+                                      size: 13, color: AppColors.textSecondary),
+                                  const SizedBox(width: 4),
+                                  Expanded(
+                                    child: Text(
+                                      'Medications: ${_selectedPatient!.medications}',
+                                      style: const TextStyle(
+                                          fontSize: 12, color: AppColors.textSecondary),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ],
                         ],
                       ),
-                      if (_selectedPatient!.medications != null) ...[
-                        const SizedBox(height: 6),
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Icon(Icons.medication_outlined,
-                                size: 13, color: AppColors.textSecondary),
-                            const SizedBox(width: 4),
-                            Expanded(
-                              child: Text(
-                                'Medications: ${_selectedPatient!.medications}',
-                                style: const TextStyle(
-                                    fontSize: 12, color: AppColors.textSecondary),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ],
-                  ],
-                ),
               ),
               const SizedBox(height: 16),
 
@@ -1131,6 +1137,86 @@ class _RiskResultDialog extends StatelessWidget {
 // is assigned 50+ patients (a long alphabetical scroll with no way to
 // filter); this lets them type a few letters of a name or purok instead.
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Patient Summary Card — Non-editable summary shown when opening Add Health
+// Record from inside a patient's profile screen. Shows patient name, age,
+// sex, diabetes type, current risk badge, and medications with no dropdown arrow
+// and nothing to tap.
+// ─────────────────────────────────────────────────────────────────────────────
+class _PatientSummaryCard extends StatelessWidget {
+  final Patient patient;
+
+  const _PatientSummaryCard({required this.patient});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.divider),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: Text(
+                  patient.fullName,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              RiskBadge(riskLevel: patient.riskLevel, compact: true),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '${patient.age} yrs • ${patient.sex} • ${patient.diabetesType}',
+            style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+          ),
+          if (patient.medications != null && patient.medications!.trim().isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(
+                  Icons.medication_outlined,
+                  size: 13,
+                  color: AppColors.textSecondary,
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    'Medications: ${patient.medications}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Patient picker — tappable field that opens a searchable bottom sheet.
+// Shows only the patient's full name (no purok or address suffix).
+// In edit mode (enabled: false), displays as read-only and greyed out.
+// ─────────────────────────────────────────────────────────────────────────────
 class _PatientPickerField extends StatelessWidget {
   final Patient? selected;
   final List<Patient> patients;
@@ -1149,14 +1235,19 @@ class _PatientPickerField extends StatelessWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _PatientPickerSheet(patients: patients, selected: selected),
+      builder: (sheetContext) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
+        ),
+        child: _PatientPickerSheet(patients: patients, selected: selected),
+      ),
     );
     if (picked != null) onChanged(picked);
   }
 
   @override
   Widget build(BuildContext context) {
-    final bool canPick = enabled && patients.length > 1;
+    final bool canPick = enabled && patients.isNotEmpty;
 
     return InkWell(
       borderRadius: BorderRadius.circular(10),
@@ -1170,21 +1261,27 @@ class _PatientPickerField extends StatelessWidget {
         ),
         child: Row(
           children: [
-            const Icon(Icons.person_outline_rounded, size: 18, color: AppColors.textSecondary),
+            Icon(
+              Icons.person_outline_rounded,
+              size: 18,
+              color: enabled ? AppColors.textSecondary : Colors.grey.shade400,
+            ),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                selected != null ? '${selected!.fullName} — ${_purokLabel(selected!.purok)}' : 'Select a patient',
+                selected != null ? selected!.fullName : 'Select a patient',
                 style: TextStyle(
                   fontSize: 14,
                   fontWeight: selected != null ? FontWeight.w600 : FontWeight.w400,
-                  color: selected != null ? AppColors.textPrimary : AppColors.textSecondary,
+                  color: selected != null
+                      ? (enabled ? AppColors.textPrimary : AppColors.textSecondary)
+                      : AppColors.textSecondary,
                 ),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
             if (canPick)
-              const Icon(Icons.unfold_more_rounded, size: 18, color: AppColors.textSecondary),
+              const Icon(Icons.arrow_drop_down_rounded, size: 24, color: AppColors.textSecondary),
           ],
         ),
       ),
@@ -1192,18 +1289,46 @@ class _PatientPickerField extends StatelessWidget {
   }
 }
 
-class _PatientPickerSheet extends StatelessWidget {
+// ─────────────────────────────────────────────────────────────────────────────
+// Searchable bottom sheet with live name filtering.
+// Displays patient full names (no purok or address) and clear empty state.
+// ─────────────────────────────────────────────────────────────────────────────
+class _PatientPickerSheet extends StatefulWidget {
   final List<Patient> patients;
   final Patient? selected;
 
-  const _PatientPickerSheet({required this.patients, required this.selected});
+  const _PatientPickerSheet({
+    required this.patients,
+    required this.selected,
+  });
+
+  @override
+  State<_PatientPickerSheet> createState() => _PatientPickerSheetState();
+}
+
+class _PatientPickerSheetState extends State<_PatientPickerSheet> {
+  final _searchController = TextEditingController();
+  String _searchQuery = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    final query = _searchQuery.trim().toLowerCase();
+    final filtered = query.isEmpty
+        ? widget.patients
+        : widget.patients
+            .where((p) => p.fullName.toLowerCase().contains(query))
+            .toList();
+
     return DraggableScrollableSheet(
-      initialChildSize: 0.6,
-      minChildSize: 0.4,
-      maxChildSize: 0.85,
+      initialChildSize: 0.7,
+      minChildSize: 0.45,
+      maxChildSize: 0.9,
       expand: false,
       builder: (context, scrollController) {
         return Container(
@@ -1223,7 +1348,7 @@ class _PatientPickerSheet extends StatelessWidget {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
                 child: Row(
                   children: [
                     const Expanded(
@@ -1233,35 +1358,77 @@ class _PatientPickerSheet extends StatelessWidget {
                       ),
                     ),
                     Text(
-                      '${patients.length} patient${patients.length != 1 ? "s" : ""}',
+                      '${filtered.length} patient${filtered.length != 1 ? "s" : ""}',
                       style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
                     ),
                   ],
                 ),
               ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                child: TextField(
+                  controller: _searchController,
+                  onChanged: (v) => setState(() => _searchQuery = v),
+                  decoration: InputDecoration(
+                    hintText: 'Search patient by name...',
+                    prefixIcon: const Icon(Icons.search, size: 20, color: AppColors.textSecondary),
+                    suffixIcon: _searchQuery.isNotEmpty
+                        ? IconButton(
+                            icon: const Icon(Icons.clear, size: 18, color: AppColors.textSecondary),
+                            onPressed: () {
+                              _searchController.clear();
+                              setState(() => _searchQuery = '');
+                            },
+                          )
+                        : null,
+                    filled: true,
+                    fillColor: AppColors.background,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: AppColors.divider),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: AppColors.divider),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: AppColors.primary, width: 1.5),
+                    ),
+                  ),
+                ),
+              ),
               const Divider(height: 1, color: AppColors.divider),
               Expanded(
-                child: patients.isEmpty
-                    ? const EmptyState(
-                        icon: Icons.people_outline_rounded,
-                        title: 'No patients found',
-                        subtitle: 'No assigned patients available.',
+                child: filtered.isEmpty
+                    ? const Padding(
+                        padding: EdgeInsets.only(top: 40),
+                        child: EmptyState(
+                          icon: Icons.person_search_outlined,
+                          title: 'No patient found',
+                          subtitle: 'No assigned patients match your search.',
+                        ),
                       )
                     : ListView.builder(
                         controller: scrollController,
                         padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-                        itemCount: patients.length,
+                        itemCount: filtered.length,
                         itemBuilder: (_, i) {
-                          final p = patients[i];
-                          final isSelected = p.id == selected?.id;
+                          final p = filtered[i];
+                          final isSelected = p.id == widget.selected?.id;
                           return ListTile(
                             onTap: () => Navigator.pop(context, p),
                             title: Text(
                               p.fullName,
-                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                              style: TextStyle(
+                                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w600,
+                                fontSize: 14,
+                                color: isSelected ? AppColors.primary : AppColors.textPrimary,
+                              ),
                             ),
                             subtitle: Text(
-                              '${p.age} yrs • ${p.sex} • ${_purokLabel(p.purok)}',
+                              '${p.age} yrs • ${p.sex} • ${p.diabetesType}',
                               style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
                             ),
                             trailing: isSelected
