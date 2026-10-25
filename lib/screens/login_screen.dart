@@ -33,6 +33,24 @@ class _LoginScreenState extends State<LoginScreen> {
   EdgeInsets? _frozenViewPadding;
 
   @override
+  void initState() {
+    super.initState();
+    _loadSavedCredentials();
+  }
+
+  Future<void> _loadSavedCredentials() async {
+    final auth = AuthService();
+    final savedUsername = await auth.getSavedUsername();
+    if (mounted) {
+      setState(() {
+        if (savedUsername != null && savedUsername.isNotEmpty) {
+          _usernameController.text = savedUsername;
+        }
+      });
+    }
+  }
+
+  @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     _frozenSize ??= MediaQuery.of(context).size;
@@ -431,7 +449,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                   },
                                 ),
 
-                                SizedBox(height: availableHeight * 0.028),
+                                SizedBox(height: availableHeight * 0.022),
 
                                 // Sign in button — sized to fit its own content
                                 // (icon + text + theme padding) rather than a

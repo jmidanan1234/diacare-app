@@ -4,6 +4,7 @@ import '../models/patient.dart';
 import '../models/health_record.dart';
 import '../models/user_model.dart';
 import '../models/notification_model.dart';
+import '../models/sync_log.dart';
 import '../utils/constants.dart';
 
 class DatabaseHelper {
@@ -24,10 +25,108 @@ class DatabaseHelper {
       path,
       version: AppConstants.dbVersion,
       onCreate: _onCreate,
+      onOpen: (db) async {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS sync_logs (
+            id TEXT PRIMARY KEY,
+            bhwId TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            recordCount INTEGER NOT NULL,
+            syncedPatients INTEGER NOT NULL DEFAULT 0,
+            syncedRecords INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            errorMessage TEXT
+          )
+        ''');
+
+        // Approval is gone. Patients registered by an earlier build are
+        // still sitting locally as 'Pending Approval', which the list
+        // screen hides and the record form refuses to attach a visit to —
+        // so a worker upgrading in the field would lose sight of people
+        // they had already registered. Promote them on open. Rejected
+        // patients ('Inactive') are left alone.
+        await db.execute(
+          "UPDATE patients SET status = 'Approved' "
+          "WHERE status != 'Approved' AND status != 'Inactive'",
+        );
+
+        // height/weight were added after the first field build. ALTER
+        // rather than a version bump: onUpgrade here drops every table,
+        // which would throw away visits a worker has not synced yet.
+        for (final column in [
+          'height REAL',
+          'weight REAL',
+          'temp REAL',
+          "referral TEXT NOT NULL DEFAULT 'none'",
+        ]) {
+          try {
+            await db.execute('ALTER TABLE health_records ADD COLUMN $column');
+          } catch (_) {
+            // Already present — this runs on every open.
+          }
+        }
+
+        // Home Address was replaced by Barangay + Purok. On a database
+        // from an earlier build the column is still there and NOT NULL,
+        // so an insert that no longer supplies it would be refused —
+        // every new patient registration would fail on an upgraded
+        // phone. Dropped here; see _dropPatientAddressColumn for how.
+        await _dropPatientAddressColumn(db);
+
+        // Vitals became optional: a visit can be a medication check with
+        // no glucometer reading. An earlier build declared them NOT NULL,
+        // which would refuse exactly that visit on an upgraded phone.
+        await _relaxHealthRecordVitals(db);
+
+        // Follow-up flags raised by the RHU, added after the first field
+        // build for the same reason as the columns above.
+        for (final column in [
+          'flagged INTEGER NOT NULL DEFAULT 0',
+          'flagReason TEXT',
+          'flagNotes TEXT',
+        ]) {
+          try {
+            await db.execute('ALTER TABLE patients ADD COLUMN $column');
+          } catch (_) {
+            // Already present.
+          }
+        }
+
+        // Clear premature 'Normal' risk level for patients who have no
+        // health record with a glucose reading. Risk is glucose-only, so
+        // BP alone does not count as an assessment.
+        try {
+          await db.execute('''
+            UPDATE patients 
+            SET riskLevel = '' 
+            WHERE riskLevel = 'Normal' AND id NOT IN (
+              SELECT DISTINCT patientId FROM health_records WHERE bloodGlucose > 0
+            )
+          ''');
+          // Clear premature no_visit notifications for patients registered less than 7 days ago
+          await db.execute('''
+            DELETE FROM notifications 
+            WHERE type = 'no_visit' 
+            AND patientId IN (
+              SELECT id FROM patients 
+              WHERE createdAt >= datetime('now', '-7 days')
+            )
+          ''');
+        } catch (_) {}
+
+        // Risk labels already stored on this phone may have been computed
+        // with older rules (old glucose thresholds, or BP). Bring them in
+        // line with the validated glucose-only ones so no screen shows a
+        // stale label; changed rows are queued for the next sync.
+        try {
+          await _reclassifyStoredRisk(db);
+        } catch (_) {}
+      },
       // Dev-time convenience: since this app has not shipped yet, upgrades
       // simply rebuild the schema from scratch. Replace with real column
       // migrations (ALTER TABLE) before any real field data exists.
       onUpgrade: (db, oldVersion, newVersion) async {
+        await db.execute('DROP TABLE IF EXISTS sync_logs');
         await db.execute('DROP TABLE IF EXISTS notifications');
         await db.execute('DROP TABLE IF EXISTS health_records');
         await db.execute('DROP TABLE IF EXISTS patients');
@@ -35,6 +134,193 @@ class DatabaseHelper {
         await _onCreate(db, newVersion);
       },
     );
+  }
+
+  /// SQL twin of RiskClassifier.classify(). Glucose-only, same thresholds
+  /// (ADA 2026 §6), built from the same AppConstants so the two can never
+  /// drift apart. Blood pressure must NOT appear here.
+  ///   No glucose reading: '' (not assessed), matching the Dart classifier,
+  ///                       which returns null -> ''.
+  ///   Highly At Risk:     glucose < severeLow or > severeHigh.
+  ///   At Risk:            glucose < targetMin or > targetMax.
+  ///   Normal:             anything else that has a glucose reading.
+  String get _riskCaseSql => '''
+  CASE
+    WHEN bloodGlucose IS NULL OR bloodGlucose <= 0
+      THEN ''
+    WHEN bloodGlucose < ${AppConstants.glucoseSevereLow}
+      OR bloodGlucose > ${AppConstants.glucoseSevereHigh}
+      THEN '${AppConstants.riskHigh}'
+    WHEN bloodGlucose < ${AppConstants.glucoseTargetMin}
+      OR bloodGlucose > ${AppConstants.glucoseTargetMax}
+      THEN '${AppConstants.riskModerate}'
+    ELSE '${AppConstants.riskNormal}'
+  END''';
+
+  /// Re-derives the stored risk label of every visit that has a glucose or
+  /// BP reading, then re-points each patient at the label of their latest
+  /// classified visit (or '' if none of their visits can be classified).
+  ///
+  /// Only rows whose label actually changes are touched. Those rows are
+  /// stamped with a fresh updatedAt and marked unsynced, so the corrected
+  /// labels go up on the next sync instead of staying stale on the server.
+  /// Rows that already match are left alone, so this is safe to run on
+  /// every open and only queues each row once.
+  Future<void> _reclassifyStoredRisk(Database db) async {
+    final now = DateTime.now().toIso8601String();
+
+    await db.rawUpdate('''
+      UPDATE health_records
+      SET riskLevel = $_riskCaseSql,
+          updatedAt = ?,
+          isSynced = 0
+      WHERE (bloodGlucose > 0 OR systolicBP > 0 OR diastolicBP > 0)
+        AND riskLevel != ($_riskCaseSql)
+    ''', [now]);
+
+    // Patients with at least one classified visit: take the latest one.
+    await db.rawUpdate('''
+      UPDATE patients
+      SET riskLevel = (
+            SELECT r.riskLevel FROM health_records r
+            WHERE r.patientId = patients.id AND r.riskLevel != ''
+            ORDER BY r.visitDate DESC
+            LIMIT 1
+          ),
+          updatedAt = ?,
+          isSynced = 0
+      WHERE EXISTS (
+        SELECT 1 FROM health_records r
+        WHERE r.patientId = patients.id AND r.riskLevel != ''
+      )
+      AND riskLevel != (
+        SELECT r.riskLevel FROM health_records r
+        WHERE r.patientId = patients.id AND r.riskLevel != ''
+        ORDER BY r.visitDate DESC
+        LIMIT 1
+      )
+    ''', [now]);
+
+    // Patients who have visits but none with a glucose reading: they are
+    // not assessed, so drop any stale label (e.g. one derived from BP).
+    await db.rawUpdate('''
+      UPDATE patients
+      SET riskLevel = '',
+          updatedAt = ?,
+          isSynced = 0
+      WHERE riskLevel != ''
+        AND EXISTS (
+          SELECT 1 FROM health_records r WHERE r.patientId = patients.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM health_records r
+          WHERE r.patientId = patients.id AND r.riskLevel != ''
+        )
+    ''', [now]);
+  }
+
+  /// Removes the legacy `address` column from `patients` if present.
+  ///
+  /// `ALTER TABLE … DROP COLUMN` needs SQLite 3.35, which older Android
+  /// releases do not ship. When it is refused, the table is rebuilt the
+  /// long way: copy every row into a new table without the column, drop
+  /// the old one, rename. Both paths keep every patient row and every
+  /// health record that points at one — the ids do not change.
+  Future<void> _dropPatientAddressColumn(Database db) async {
+    final columns = await db.rawQuery('PRAGMA table_info(patients)');
+    final hasAddress = columns.any((c) => c['name'] == 'address');
+    if (!hasAddress) return;
+
+    try {
+      await db.execute('ALTER TABLE patients DROP COLUMN address');
+      return;
+    } catch (_) {
+      // Fall through to the rebuild.
+    }
+
+    final keep = columns
+        .map((c) => c['name'] as String)
+        .where((n) => n != 'address')
+        .join(', ');
+
+    await db.transaction((txn) async {
+      await txn.execute('''
+        CREATE TABLE patients_new (
+          id TEXT PRIMARY KEY,
+          firstName TEXT NOT NULL,
+          lastName TEXT NOT NULL,
+          middleName TEXT,
+          birthDate TEXT NOT NULL,
+          sex TEXT NOT NULL,
+          barangay TEXT NOT NULL,
+          purok TEXT NOT NULL,
+          contactNumber TEXT,
+          diabetesType TEXT NOT NULL,
+          diagnosisDate TEXT,
+          medications TEXT,
+          attendingPhysician TEXT,
+          emergencyContact TEXT,
+          emergencyContactNumber TEXT,
+          assignedBhwId TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'Approved',
+          riskLevel TEXT NOT NULL DEFAULT '',
+          flagged INTEGER NOT NULL DEFAULT 0,
+          flagReason TEXT,
+          flagNotes TEXT,
+          createdAt TEXT NOT NULL,
+          updatedAt TEXT NOT NULL,
+          isSynced INTEGER NOT NULL DEFAULT 0
+        )
+      ''');
+      await txn.execute('INSERT INTO patients_new ($keep) SELECT $keep FROM patients');
+      await txn.execute('DROP TABLE patients');
+      await txn.execute('ALTER TABLE patients_new RENAME TO patients');
+    });
+  }
+
+  /// Rebuilds `health_records` without NOT NULL on the vital columns.
+  /// SQLite cannot alter a constraint in place, so this is the standard
+  /// copy-drop-rename; ids are preserved, so nothing loses its patient.
+  /// Runs once — the check on `notnull` makes every later open a no-op.
+  Future<void> _relaxHealthRecordVitals(Database db) async {
+    final columns = await db.rawQuery('PRAGMA table_info(health_records)');
+    final glucose = columns.where((c) => c['name'] == 'bloodGlucose');
+    if (glucose.isEmpty || glucose.first['notnull'] != 1) return;
+
+    final keep = columns.map((c) => c['name'] as String).join(', ');
+
+    await db.transaction((txn) async {
+      await txn.execute('''
+        CREATE TABLE health_records_new (
+          id TEXT PRIMARY KEY,
+          patientId TEXT NOT NULL,
+          bhwId TEXT NOT NULL,
+          bloodGlucose REAL,
+          systolicBP REAL,
+          diastolicBP REAL,
+          bmi REAL,
+          height REAL,
+          weight REAL,
+          temp REAL,
+          referral TEXT NOT NULL DEFAULT 'none',
+          medAdherence TEXT NOT NULL DEFAULT 'taken',
+          insulinUse INTEGER NOT NULL DEFAULT 0,
+          medicationName TEXT,
+          dosage TEXT,
+          observations TEXT,
+          riskLevel TEXT NOT NULL DEFAULT '',
+          visitDate TEXT NOT NULL,
+          createdAt TEXT NOT NULL,
+          updatedAt TEXT NOT NULL,
+          isSynced INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY (patientId) REFERENCES patients (id)
+        )
+      ''');
+      await txn.execute(
+          'INSERT INTO health_records_new ($keep) SELECT $keep FROM health_records');
+      await txn.execute('DROP TABLE health_records');
+      await txn.execute('ALTER TABLE health_records_new RENAME TO health_records');
+    });
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -66,7 +352,6 @@ class DatabaseHelper {
         middleName TEXT,
         birthDate TEXT NOT NULL,
         sex TEXT NOT NULL,
-        address TEXT NOT NULL,
         barangay TEXT NOT NULL,
         purok TEXT NOT NULL,
         contactNumber TEXT,
@@ -77,8 +362,11 @@ class DatabaseHelper {
         emergencyContact TEXT,
         emergencyContactNumber TEXT,
         assignedBhwId TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'Pending Approval',
-        riskLevel TEXT NOT NULL DEFAULT 'Normal',
+        status TEXT NOT NULL DEFAULT 'Approved',
+        riskLevel TEXT NOT NULL DEFAULT '',
+        flagged INTEGER NOT NULL DEFAULT 0,
+        flagReason TEXT,
+        flagNotes TEXT,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL,
         isSynced INTEGER NOT NULL DEFAULT 0
@@ -91,16 +379,20 @@ class DatabaseHelper {
         id TEXT PRIMARY KEY,
         patientId TEXT NOT NULL,
         bhwId TEXT NOT NULL,
-        bloodGlucose REAL NOT NULL,
-        systolicBP REAL NOT NULL,
-        diastolicBP REAL NOT NULL,
-        bmi REAL NOT NULL,
+        bloodGlucose REAL,
+        systolicBP REAL,
+        diastolicBP REAL,
+        bmi REAL,
+        height REAL,
+        weight REAL,
+        temp REAL,
+        referral TEXT NOT NULL DEFAULT 'none',
         medAdherence TEXT NOT NULL DEFAULT 'taken',
         insulinUse INTEGER NOT NULL DEFAULT 0,
         medicationName TEXT,
         dosage TEXT,
         observations TEXT,
-        riskLevel TEXT NOT NULL,
+        riskLevel TEXT NOT NULL DEFAULT '',
         visitDate TEXT NOT NULL,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL,
@@ -119,6 +411,20 @@ class DatabaseHelper {
         message TEXT NOT NULL,
         isRead INTEGER NOT NULL DEFAULT 0,
         createdAt TEXT NOT NULL
+      )
+    ''');
+
+    // Sync logs table
+    await db.execute('''
+      CREATE TABLE sync_logs (
+        id TEXT PRIMARY KEY,
+        bhwId TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        recordCount INTEGER NOT NULL,
+        syncedPatients INTEGER NOT NULL DEFAULT 0,
+        syncedRecords INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        errorMessage TEXT
       )
     ''');
 
@@ -176,7 +482,6 @@ class DatabaseHelper {
         'middleName': 'Reyes',
         'birthDate': '1965-04-12',
         'sex': 'Male',
-        'address': '123 Sampaguita St., Purok 3',
         'barangay': 'Barangay San Jose',
         'purok': 'Purok 3',
         'contactNumber': '09171234567',
@@ -200,7 +505,6 @@ class DatabaseHelper {
         'middleName': null,
         'birthDate': '1972-09-25',
         'sex': 'Female',
-        'address': '45 Rosal St., Purok 3',
         'barangay': 'Barangay San Jose',
         'purok': 'Purok 3',
         'contactNumber': '09191234567',
@@ -224,7 +528,6 @@ class DatabaseHelper {
         'middleName': 'Cruz',
         'birthDate': '1958-01-30',
         'sex': 'Male',
-        'address': '89 Ilang-Ilang Ave., Purok 3',
         'barangay': 'Barangay San Jose',
         'purok': 'Purok 3',
         'contactNumber': '09261234567',
@@ -247,13 +550,16 @@ class DatabaseHelper {
       await db.insert('patients', p);
     }
 
-    // Demo health records
+    // Demo health records. Glucose values are chosen so the seeded labels
+    // match the glucose-only tiers (<54 / >250 Highly At Risk,
+    // 54-69 / 181-250 At Risk, 70-180 Normal), so the reclassifier on
+    // first open has nothing to change.
     final records = [
       {
         'id': 'rec-001',
         'patientId': 'pat-001',
         'bhwId': 'bhw-001',
-        'bloodGlucose': 220.0,
+        'bloodGlucose': 260.0,
         'systolicBP': 145.0,
         'diastolicBP': 92.0,
         'bmi': 28.5,
@@ -291,7 +597,7 @@ class DatabaseHelper {
         'id': 'rec-003',
         'patientId': 'pat-002',
         'bhwId': 'bhw-001',
-        'bloodGlucose': 160.0,
+        'bloodGlucose': 190.0,
         'systolicBP': 133.0,
         'diastolicBP': 85.0,
         'bmi': 26.1,
@@ -337,7 +643,7 @@ class DatabaseHelper {
       'patientId': 'pat-001',
       'patientName': 'Juan Dela Cruz',
       'type': 'high_risk',
-      'message': 'Juan Dela Cruz has been classified as HIGH RISK. Immediate follow-up recommended.',
+      'message': 'Juan Dela Cruz has been classified as Highly At Risk. Immediate follow-up recommended.',
       'isRead': 0,
       'createdAt': now.subtract(const Duration(days: 2)).toIso8601String(),
     });
@@ -411,16 +717,18 @@ class DatabaseHelper {
     final db = await database;
     final maps = await db.query(
       'patients',
-      where: 'assignedBhwId = ? AND status = ?',
-      whereArgs: [bhwId, 'Approved'],
+      // Everything but a patient the RHU marked inactive. There is no
+      // approval step left to filter on.
+      where: 'assignedBhwId = ? AND status != ?',
+      whereArgs: [bhwId, 'Inactive'],
       orderBy: 'lastName ASC',
     );
     return maps.map((m) => Patient.fromMap(m)).toList();
   }
 
-  /// Returns every patient a BHW has submitted, regardless of approval
-  /// status — used so a BHW can see patients still awaiting BHN approval
-  /// instead of them silently disappearing after submission.
+  /// Returns every patient registered by this BHW, including ones the RHU
+  /// marked Inactive. Callers that should not show Inactive patients
+  /// (e.g. AppProvider.loadAll) filter them out themselves.
   Future<List<Patient>> getAllPatientsByBhw(String bhwId) async {
     final db = await database;
     final maps = await db.query(
@@ -625,6 +933,17 @@ class DatabaseHelper {
     return HealthRecord.fromMap(maps.first);
   }
 
+  Future<HealthRecord?> getRecordById(String id) async {
+    final db = await database;
+    final maps =
+        await db.query('health_records', where: 'id = ?', whereArgs: [id]);
+    if (maps.isEmpty) return null;
+    return HealthRecord.fromMap(maps.first);
+  }
+
+  /// Inserts a visit, or replaces it if a row with the same id exists —
+  /// this is what lets a correction (same id, new readings) update the
+  /// original visit in place.
   Future<void> insertHealthRecord(HealthRecord record) async {
     final db = await database;
     await db.insert('health_records', record.toMap(), conflictAlgorithm: ConflictAlgorithm.replace);
@@ -633,7 +952,7 @@ class DatabaseHelper {
   Future<int> countHighRiskPatients(String bhwId) async {
     final db = await database;
     final result = await db.rawQuery(
-      "SELECT COUNT(*) as count FROM patients WHERE assignedBhwId = ? AND riskLevel = 'Highly At Risk' AND status = 'Approved'",
+      "SELECT COUNT(*) as count FROM patients WHERE assignedBhwId = ? AND riskLevel = 'Highly At Risk' AND status != 'Inactive'",
       [bhwId],
     );
     return Sqflite.firstIntValue(result) ?? 0;
@@ -645,7 +964,7 @@ class DatabaseHelper {
     // Patients with no record or last visit > days ago
     final result = await db.rawQuery('''
       SELECT COUNT(*) as count FROM patients p
-      WHERE p.assignedBhwId = ? AND p.status = 'Approved'
+      WHERE p.assignedBhwId = ? AND p.status != 'Inactive'
       AND (
         NOT EXISTS (SELECT 1 FROM health_records r WHERE r.patientId = p.id)
         OR (SELECT MAX(r2.visitDate) FROM health_records r2 WHERE r2.patientId = p.id) < ?
@@ -719,6 +1038,35 @@ class DatabaseHelper {
     );
   }
 
+  /// Marks any unread "Highly At Risk" alerts for this patient as read.
+  /// Called when a correction to the patient's latest visit brings it out
+  /// of the Highly At Risk band — without this, the old alert would keep
+  /// showing as unread and claim the patient is still Highly At Risk.
+  /// Works the same way as [resolveNoVisitNotifications]: the alert stays
+  /// in the history, it just stops counting as unread.
+  Future<void> resolveHighRiskNotifications(String patientId) async {
+    final db = await database;
+    await db.update(
+      'notifications',
+      {'isRead': 1},
+      where: 'patientId = ? AND type = ? AND isRead = 0',
+      whereArgs: [patientId, 'high_risk'],
+    );
+  }
+
+  /// Marks high-BP alerts for this patient as read. Called when a corrected
+  /// visit brings the BP back below the hypertension threshold, so the bell
+  /// list stops showing a stale "high blood pressure" notice.
+  Future<void> resolveHighBpNotifications(String patientId) async {
+    final db = await database;
+    await db.update(
+      'notifications',
+      {'isRead': 1},
+      where: 'patientId = ? AND type = ? AND isRead = 0',
+      whereArgs: [patientId, 'high_bp'],
+    );
+  }
+
   Future<void> markAllNotificationsRead(String bhwId) async {
     final db = await database;
     final patients = await getPatientsByBhw(bhwId);
@@ -729,5 +1077,61 @@ class DatabaseHelper {
       'UPDATE notifications SET isRead = 1 WHERE patientId IN ($placeholders)',
       patientIds,
     );
+  }
+
+  // ==================== SYNC LOGS ====================
+  /// How many sync attempts are kept per worker. The Sync History screen
+  /// shows the most recent 50; anything past this is of no use to anyone
+  /// and every sync — successful or failed — adds another row.
+  static const int _syncLogRetention = 200;
+
+  Future<void> insertSyncLog(SyncLog log) async {
+    final db = await database;
+    await db.insert(
+      'sync_logs',
+      log.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    await _pruneSyncLogs(db, log.bhwId);
+  }
+
+  Future<void> _pruneSyncLogs(Database db, String bhwId) async {
+    await db.rawDelete(
+      '''
+      DELETE FROM sync_logs
+      WHERE bhwId = ? AND id NOT IN (
+        SELECT id FROM sync_logs
+        WHERE bhwId = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+      )
+      ''',
+      [bhwId, bhwId, _syncLogRetention],
+    );
+  }
+
+  Future<List<SyncLog>> getSyncLogsByBhw(String bhwId, {int limit = 50}) async {
+    final db = await database;
+    final maps = await db.query(
+      'sync_logs',
+      where: 'bhwId = ?',
+      whereArgs: [bhwId],
+      orderBy: 'timestamp DESC',
+      limit: limit,
+    );
+    return maps.map((m) => SyncLog.fromMap(m)).toList();
+  }
+
+  Future<SyncLog?> getLatestSyncLog(String bhwId) async {
+    final db = await database;
+    final maps = await db.query(
+      'sync_logs',
+      where: 'bhwId = ?',
+      whereArgs: [bhwId],
+      orderBy: 'timestamp DESC',
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return SyncLog.fromMap(maps.first);
   }
 }

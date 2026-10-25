@@ -3,10 +3,22 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../../providers/app_provider.dart';
 import '../../models/patient.dart';
+import '../../models/health_record.dart';
 import '../../services/risk_classifier.dart';
 import '../../utils/theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/shared_widgets.dart';
+
+/// Purok is often entered as just a number ("4"), which is confusing when
+/// shown on its own. Anything that starts with a digit and doesn't already
+/// say "purok" is displayed as "Purok 4"; text entries are left untouched.
+String _purokLabel(String? purok) {
+  final p = (purok ?? '').trim();
+  if (p.isEmpty) return 'No purok';
+  if (p.toLowerCase().contains('purok')) return p;
+  if (RegExp(r'^\d').hasMatch(p)) return 'Purok $p';
+  return p;
+}
 
 enum MedAdherence { taken, partial, missed }
 
@@ -28,10 +40,15 @@ class AddRecordScreen extends StatefulWidget {
   final List<Patient> patients;
   final Patient? preselectedPatient;
 
+  /// When set, the screen opens in correction mode: the form is pre-filled
+  /// from this record and saving updates it instead of creating a new visit.
+  final HealthRecord? existingRecord;
+
   const AddRecordScreen({
     super.key,
     required this.patients,
     this.preselectedPatient,
+    this.existingRecord,
   });
 
   @override
@@ -49,6 +66,14 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   final _medicationNameController = TextEditingController();
   final _dosageController = TextEditingController();
 
+  // One focus node per required field, in on-screen order. Used to find
+  // the first invalid field and scroll to it when Save is pressed.
+  final _glucoseFocus = FocusNode();
+  final _systolicFocus = FocusNode();
+  final _diastolicFocus = FocusNode();
+  final _heightFocus = FocusNode();
+  final _weightFocus = FocusNode();
+
   Patient? _selectedPatient;
   MedAdherence _medAdherence = MedAdherence.taken;
   bool _insulinUse = false;
@@ -56,13 +81,149 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   String? _classifiedRisk;
   double? _calculatedBmi;
 
+  /// True while the Height field still holds the value copied from the
+  /// patient's last visit. Drives the small "From last visit" note so the
+  /// BHW notices the height was pre-filled; cleared once they edit it.
+  bool _heightFromLastVisit = false;
+
+  bool get _isEdit => widget.existingRecord != null;
+
+  /// 120.0 -> "120", 98.6 -> "98.6"
+  String _fmt(double v) =>
+      v == v.roundToDouble() ? v.toInt().toString() : v.toString();
+
+  MedAdherence _adherenceFromValue(String v) {
+    if (v == AppConstants.medPartial) return MedAdherence.partial;
+    if (v == AppConstants.medMissed) return MedAdherence.missed;
+    return MedAdherence.taken;
+  }
+
+  /// Which patient the form opens on. In correction mode this is always the
+  /// record's own patient (so the result dialog never shows the wrong name),
+  /// otherwise the preselected one, otherwise the first in the list.
+  /// Null only if the list is empty.
+  Patient? _resolveInitialPatient() {
+    final r = widget.existingRecord;
+    if (r != null) {
+      for (final p in widget.patients) {
+        if (p.id == r.patientId) return p;
+      }
+    }
+    return widget.preselectedPatient ?? widget.patients.firstOrNull;
+  }
+
+  /// Switching patients must not carry the previous patient's readings over.
+  /// reset() clears every field (and any red error text); medication details
+  /// and height are then re-filled by [_prefillFromLastVisit].
+  void _resetForNewPatient() {
+    _formKey.currentState?.reset();
+    _glucoseController.clear();
+    _systolicController.clear();
+    _diastolicController.clear();
+    _weightController.clear();
+    _observationsController.clear();
+    setState(() {
+      _medAdherence = MedAdherence.taken;
+      _insulinUse = false;
+      _classifiedRisk = null;
+      _calculatedBmi = null;
+      _heightFromLastVisit = false;
+    });
+  }
+
+  // ── Validators ────────────────────────────────────────────────────────
+  // Each one rejects an empty value first, so a required field can never be
+  // skipped, then defers to the RiskClassifier range check.
+  String? _validateGlucose(String? v) {
+    if (v == null || v.trim().isEmpty) return 'Blood glucose is required';
+    return RiskClassifier.validateBloodGlucose(v);
+  }
+
+  String? _validateSystolic(String? v) {
+    if (v == null || v.trim().isEmpty) return 'Required';
+    return RiskClassifier.validateSystolicBP(v);
+  }
+
+  String? _validateDiastolic(String? v) {
+    if (v == null || v.trim().isEmpty) return 'Required';
+    final err = RiskClassifier.validateDiastolicBP(v);
+    if (err != null) return err;
+    // Diastolic (bottom number) can never reach the systolic (top number).
+    final s = double.tryParse(_systolicController.text.trim());
+    final d = double.tryParse(v.trim());
+    if (s != null && d != null && d >= s) return 'Must be lower than systolic';
+    return null;
+  }
+
+  String? _validateHeight(String? v) {
+    if (v == null || v.trim().isEmpty) return null; // optional
+    return RiskClassifier.validateHeight(v);
+  }
+
+  String? _validateWeight(String? v) {
+    if (v == null || v.trim().isEmpty) return null; // optional
+    return RiskClassifier.validateWeight(v);
+  }
+
+  /// Finds the first field (top to bottom) that fails validation,
+  /// scrolls it into view and focuses it.
+  void _scrollToFirstError() {
+    final fields = <(TextEditingController, String? Function(String?), FocusNode)>[
+      (_glucoseController, _validateGlucose, _glucoseFocus),
+      (_systolicController, _validateSystolic, _systolicFocus),
+      (_diastolicController, _validateDiastolic, _diastolicFocus),
+      (_heightController, _validateHeight, _heightFocus),
+      (_weightController, _validateWeight, _weightFocus),
+    ];
+
+    for (final f in fields) {
+      if (f.$2(f.$1.text) != null) {
+        final node = f.$3;
+        node.requestFocus();
+        final ctx = node.context;
+        if (ctx != null) {
+          Scrollable.ensureVisible(
+            ctx,
+            alignment: 0.2,
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeOut,
+          );
+        }
+        break;
+      }
+    }
+  }
+
   @override
   void initState() {
     super.initState();
-    _selectedPatient = widget.preselectedPatient ?? widget.patients.first;
+    _selectedPatient = _resolveInitialPatient();
+
+    final r = widget.existingRecord;
+    if (r != null) {
+      // Correction mode: fill the form from the record being edited.
+      // Done before the listeners are attached so BMI isn't recomputed
+      // half-way through.
+      if (r.bloodGlucose != null) _glucoseController.text = _fmt(r.bloodGlucose!);
+      if (r.systolicBP != null) _systolicController.text = _fmt(r.systolicBP!);
+      if (r.diastolicBP != null) _diastolicController.text = _fmt(r.diastolicBP!);
+      if (r.height != null) _heightController.text = _fmt(r.height!);
+      if (r.weight != null) _weightController.text = _fmt(r.weight!);
+      _medicationNameController.text = r.medicationName ?? '';
+      _dosageController.text = r.dosage ?? '';
+      _observationsController.text = r.observations ?? '';
+      _insulinUse = r.insulinUse;
+      _medAdherence = _adherenceFromValue(r.medAdherence);
+      _calculatedBmi = r.bmi;
+      _classifiedRisk = r.riskLevel.isEmpty ? null : r.riskLevel;
+    }
+
     _heightController.addListener(_computeBmi);
     _weightController.addListener(_computeBmi);
-    _prefillFromLastVisit();
+
+    if (!_isEdit) {
+      _prefillFromLastVisit();
+    }
   }
 
   @override
@@ -75,6 +236,11 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
     _observationsController.dispose();
     _medicationNameController.dispose();
     _dosageController.dispose();
+    _glucoseFocus.dispose();
+    _systolicFocus.dispose();
+    _diastolicFocus.dispose();
+    _heightFocus.dispose();
+    _weightFocus.dispose();
     super.dispose();
   }
 
@@ -84,20 +250,30 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   /// unchanged regimen at every single visit — they only need to edit
   /// what actually changed.
   Future<void> _prefillFromLastVisit() async {
-    if (_selectedPatient == null) return;
+    final patient = _selectedPatient;
+    if (patient == null) return;
     final provider = context.read<AppProvider>();
-    final records = await provider.getPatientRecords(_selectedPatient!.id);
-    if (!mounted) return;
+    final records = [...await provider.getPatientRecords(patient.id)]
+      ..sort((a, b) => b.visitDate.compareTo(a.visitDate));
+
+    // Bail out if the screen closed, or the BHW picked a different patient
+    // while this lookup was still running.
+    if (!mounted || _selectedPatient?.id != patient.id) return;
+
     if (records.isNotEmpty) {
       final latest = records.first;
+      _heightController.text = latest.height != null ? _fmt(latest.height!) : '';
       setState(() {
         _medicationNameController.text = latest.medicationName ?? '';
         _dosageController.text = latest.dosage ?? '';
         _insulinUse = latest.insulinUse;
+        _heightFromLastVisit = latest.height != null;
       });
-    } else if (_selectedPatient!.medications != null) {
+    } else if (patient.medications != null) {
+      _heightController.text = '';
       setState(() {
-        _medicationNameController.text = _selectedPatient!.medications!;
+        _medicationNameController.text = patient.medications!;
+        _heightFromLastVisit = false;
       });
     }
   }
@@ -105,22 +281,19 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   void _computeBmi() {
     final h = double.tryParse(_heightController.text);
     final w = double.tryParse(_weightController.text);
-    if (h != null && w != null && h > 0) {
-      final hMeters = h / 100;
-      final bmi = w / (hMeters * hMeters);
-      setState(() => _calculatedBmi = bmi);
-      _previewRisk();
-    } else {
-      setState(() => _calculatedBmi = null);
-    }
+    setState(() {
+      _calculatedBmi = (h != null && w != null && h > 0)
+          ? RiskClassifier.calculateBmi(h, w)
+          : null;
+    });
+    _previewRisk();
   }
 
   void _previewRisk() {
     final g = double.tryParse(_glucoseController.text);
     final s = double.tryParse(_systolicController.text);
     final d = double.tryParse(_diastolicController.text);
-    final bmi = _calculatedBmi;
-    if (g == null || s == null || d == null || bmi == null) return;
+    if (g == null || s == null || d == null) return;
     final risk = RiskClassifier.classify(
       bloodGlucose: g,
       systolicBP: s,
@@ -130,46 +303,94 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   }
 
   Future<void> _submit() async {
-    if (!_formKey.currentState!.validate()) return;
-    if (_selectedPatient == null) return;
-    if (_calculatedBmi == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter both height and weight to calculate BMI.')),
-      );
+    if (!_formKey.currentState!.validate()) {
+      // Show the red error text (done by validate()) AND bring the first
+      // missing field into view so the BHW doesn't have to hunt for it.
+      _scrollToFirstError();
       return;
     }
+    final patient = _selectedPatient;
+    if (patient == null) return;
 
     setState(() => _isLoading = true);
 
     final provider = context.read<AppProvider>();
-    final riskLevel = await provider.addHealthRecord(
-      patientId: _selectedPatient!.id,
-      bloodGlucose: double.parse(_glucoseController.text),
-      systolicBP: double.parse(_systolicController.text),
-      diastolicBP: double.parse(_diastolicController.text),
-      bmi: _calculatedBmi!,
-      medAdherence: _medAdherence.value,
-      insulinUse: _insulinUse,
-      medicationName: _medicationNameController.text.trim().isEmpty
-          ? null
-          : _medicationNameController.text.trim(),
-      dosage: _dosageController.text.trim().isEmpty
-          ? null
-          : _dosageController.text.trim(),
-      observations: _observationsController.text.trim().isEmpty
-          ? null
-          : _observationsController.text.trim(),
-    );
+
+    String? riskLevel;
+    try {
+      final double glucose = double.parse(_glucoseController.text);
+      final double systolic = double.parse(_systolicController.text);
+      final double diastolic = double.parse(_diastolicController.text);
+      final double? height = double.tryParse(_heightController.text);
+      final double? weight = double.tryParse(_weightController.text);
+
+      String? clean(TextEditingController c) =>
+          c.text.trim().isEmpty ? null : c.text.trim();
+      final String? medName = clean(_medicationNameController);
+      final String? dosage = clean(_dosageController);
+      final String? observations = clean(_observationsController);
+
+      final existing = widget.existingRecord;
+      if (existing != null) {
+        // Correct the existing visit in place.
+        riskLevel = await provider.updateHealthRecord(
+          original: existing,
+          bloodGlucose: glucose,
+          systolicBP: systolic,
+          diastolicBP: diastolic,
+          bmi: _calculatedBmi,
+          height: height,
+          weight: weight,
+          temp: existing.temp,
+          referral: existing.referral,
+          medAdherence: _medAdherence.value,
+          insulinUse: _insulinUse,
+          medicationName: medName,
+          dosage: dosage,
+          observations: observations,
+        );
+      } else {
+        riskLevel = await provider.addHealthRecord(
+          patientId: patient.id,
+          bloodGlucose: glucose,
+          systolicBP: systolic,
+          diastolicBP: diastolic,
+          bmi: _calculatedBmi,
+          height: height,
+          weight: weight,
+          medAdherence: _medAdherence.value,
+          insulinUse: _insulinUse,
+          medicationName: medName,
+          dosage: dosage,
+          observations: observations,
+        );
+      }
+    } catch (e) {
+      debugPrint('Saving health record failed: $e');
+      riskLevel = null;
+    } finally {
+      // Always release the button, even if the save threw.
+      if (mounted) setState(() => _isLoading = false);
+    }
 
     if (!mounted) return;
-    setState(() => _isLoading = false);
 
+    // Save failed: don't show the "Record Saved" dialog.
+    if (riskLevel == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to save record. Please try again.')),
+      );
+      return;
+    }
+
+    final String result = riskLevel; // non-null after the check above
     await showDialog(
       context: context,
       barrierDismissible: false,
       builder: (_) => _RiskResultDialog(
-        patientName: _selectedPatient!.fullName,
-        riskLevel: riskLevel,
+        patientName: patient.fullName,
+        riskLevel: result,
+        isUpdate: _isEdit,
         onClose: () => Navigator.pop(context),
       ),
     );
@@ -179,25 +400,34 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
 
   Widget _inputField({
     required TextEditingController controller,
+    required FocusNode focusNode,
     required String label,
     required String hint,
     required String? Function(String?) validator,
     String? unit,
     int maxLength = 6,
+    String? helperText,
+    VoidCallback? onEdited,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: TextFormField(
         controller: controller,
+        focusNode: focusNode,
         keyboardType: const TextInputType.numberWithOptions(decimal: true),
         inputFormatters: [
           FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
           LengthLimitingTextInputFormatter(maxLength),
         ],
-        onChanged: (_) => _previewRisk(),
+        onChanged: (_) {
+          onEdited?.call();
+          _previewRisk();
+        },
         decoration: InputDecoration(
           labelText: label,
           hintText: hint,
+          helperText: helperText,
+          helperStyle: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
           hintStyle: const TextStyle(fontSize: 13, color: Colors.black38),
           suffixText: unit,
           suffixStyle: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
@@ -229,7 +459,9 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: AppBar(title: const Text('Add Health Record')),
+      appBar: AppBar(
+        title: Text(_isEdit ? 'Edit Health Record' : 'Add Health Record'),
+      ),
       body: Form(
         key: _formKey,
         child: SingleChildScrollView(
@@ -247,8 +479,12 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                     _PatientPickerField(
                       selected: _selectedPatient,
                       patients: widget.patients,
+                      // A correction always belongs to the same patient.
+                      enabled: !_isEdit,
                       onChanged: (p) {
+                        if (p.id == _selectedPatient?.id) return;
                         setState(() => _selectedPatient = p);
+                        _resetForNewPatient();
                         _prefillFromLastVisit();
                       },
                     ),
@@ -297,10 +533,11 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                 hint: 'Measured using a glucometer during the visit',
                 child: _inputField(
                   controller: _glucoseController,
+                  focusNode: _glucoseFocus,
                   label: 'Blood Glucose Level *',
                   hint: 'e.g. 120',
                   unit: 'mg/dL',
-                  validator: RiskClassifier.validateBloodGlucose,
+                  validator: _validateGlucose,
                 ),
               ),
               const SizedBox(height: 16),
@@ -315,10 +552,11 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                     Expanded(
                       child: _inputField(
                         controller: _systolicController,
+                        focusNode: _systolicFocus,
                         label: 'Systolic *',
                         hint: 'e.g. 120',
                         unit: 'mmHg',
-                        validator: RiskClassifier.validateSystolicBP,
+                        validator: _validateSystolic,
                       ),
                     ),
                     Padding(
@@ -335,10 +573,11 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                     Expanded(
                       child: _inputField(
                         controller: _diastolicController,
+                        focusNode: _diastolicFocus,
                         label: 'Diastolic *',
                         hint: 'e.g. 80',
                         unit: 'mmHg',
-                        validator: RiskClassifier.validateDiastolicBP,
+                        validator: _validateDiastolic,
                       ),
                     ),
                   ],
@@ -349,29 +588,39 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
               // ── Height & Weight → Auto BMI ────────────────────────────
               _SectionCard(
                 title: 'Body Measurements',
-                hint: 'Enter height and weight — BMI is calculated automatically',
+                hint: 'Optional — BMI is calculated automatically when both are entered',
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Expanded(
                           child: _inputField(
                             controller: _heightController,
-                            label: 'Height *',
+                            focusNode: _heightFocus,
+                            label: 'Height',
                             hint: 'e.g. 160',
                             unit: 'cm',
-                            validator: RiskClassifier.validateHeight,
+                            validator: _validateHeight,
+                            helperText:
+                                _heightFromLastVisit ? 'From last visit' : null,
+                            onEdited: () {
+                              if (_heightFromLastVisit) {
+                                setState(() => _heightFromLastVisit = false);
+                              }
+                            },
                           ),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
                           child: _inputField(
                             controller: _weightController,
-                            label: 'Weight *',
+                            focusNode: _weightFocus,
+                            label: 'Weight',
                             hint: 'e.g. 65',
                             unit: 'kg',
-                            validator: RiskClassifier.validateWeight,
+                            validator: _validateWeight,
                           ),
                         ),
                       ],
@@ -436,10 +685,8 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                       icon: Icons.check_circle_rounded,
                       color: AppColors.success,
                       isSelected: _medAdherence == MedAdherence.taken,
-                      onTap: () => setState(() {
-                        _medAdherence = MedAdherence.taken;
-                        _previewRisk();
-                      }),
+                      onTap: () =>
+                          setState(() => _medAdherence = MedAdherence.taken),
                     ),
                     const SizedBox(height: 8),
                     _MedOption(
@@ -448,10 +695,8 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                       icon: Icons.remove_circle_rounded,
                       color: AppColors.warning,
                       isSelected: _medAdherence == MedAdherence.partial,
-                      onTap: () => setState(() {
-                        _medAdherence = MedAdherence.partial;
-                        _previewRisk();
-                      }),
+                      onTap: () =>
+                          setState(() => _medAdherence = MedAdherence.partial),
                     ),
                     const SizedBox(height: 8),
                     _MedOption(
@@ -460,10 +705,8 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                       icon: Icons.cancel_rounded,
                       color: AppColors.error,
                       isSelected: _medAdherence == MedAdherence.missed,
-                      onTap: () => setState(() {
-                        _medAdherence = MedAdherence.missed;
-                        _previewRisk();
-                      }),
+                      onTap: () =>
+                          setState(() => _medAdherence = MedAdherence.missed),
                     ),
                   ],
                 ),
@@ -518,7 +761,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                     runSpacing: 4,
                     children: [
                       const Text(
-                        'Predicted Risk Level:',
+                        'Current Risk Level:',
                         style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                       ),
                       RiskBadge(riskLevel: _classifiedRisk!),
@@ -539,15 +782,17 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                       border: Border.all(
                           color: AppColors.highRisk.withValues(alpha: 0.3)),
                     ),
-                    child: const Row(
+                    child: Row(
                       children: [
-                        Icon(Icons.warning_amber_rounded,
+                        const Icon(Icons.warning_amber_rounded,
                             color: AppColors.highRisk, size: 18),
-                        SizedBox(width: 8),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            'This patient will be flagged HIGH RISK. An alert notification will be created.',
-                            style: TextStyle(
+                            _isEdit
+                                ? 'This visit is Highly At Risk. Please refer the patient to the RHU if needed.'
+                                : 'This patient will be flagged Highly At Risk. An alert notification will be created.',
+                            style: const TextStyle(
                                 fontSize: 12, color: AppColors.highRisk),
                           ),
                         ),
@@ -588,8 +833,8 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                           child: CircularProgressIndicator(
                               color: Colors.white, strokeWidth: 2),
                         )
-                      : const Text('Save Health Record',
-                          style: TextStyle(fontSize: 15)),
+                      : Text(_isEdit ? 'Update Health Record' : 'Save Health Record',
+                          style: const TextStyle(fontSize: 15)),
                 ),
               ),
               const SizedBox(height: 32),
@@ -772,12 +1017,14 @@ class _MedOption extends StatelessWidget {
 class _RiskResultDialog extends StatelessWidget {
   final String patientName;
   final String riskLevel;
+  final bool isUpdate;
   final VoidCallback onClose;
 
   const _RiskResultDialog({
     required this.patientName,
     required this.riskLevel,
     required this.onClose,
+    this.isUpdate = false,
   });
 
   Color get _color {
@@ -805,11 +1052,11 @@ class _RiskResultDialog extends StatelessWidget {
   String get _message {
     switch (riskLevel) {
       case AppConstants.riskHigh:
-        return 'Patient requires immediate follow-up. An alert has been created. Please escalate to the RHU as needed.';
+        return 'Patient needs immediate follow-up. Please refer the patient to the RHU if needed.';
       case AppConstants.riskModerate:
-        return 'Patient is at moderate risk. Increased monitoring is recommended.';
+        return 'Patient is At Risk. Increased monitoring is recommended.';
       default:
-        return 'Patient is in normal range. Continue regular monitoring.';
+        return 'Patient is in the Normal range. Continue regular monitoring.';
     }
   }
 
@@ -830,8 +1077,8 @@ class _RiskResultDialog extends StatelessWidget {
             child: Icon(_icon, color: _color, size: 36),
           ),
           const SizedBox(height: 16),
-          const Text('Record Saved',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+          Text(isUpdate ? 'Record Updated' : 'Record Saved',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
           const SizedBox(height: 6),
           Text(patientName,
               style: const TextStyle(
@@ -877,6 +1124,7 @@ class _RiskResultDialog extends StatelessWidget {
     );
   }
 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Patient picker — tappable field that opens a searchable bottom sheet
 // instead of a plain dropdown. A flat dropdown becomes unusable once a BHW
@@ -887,11 +1135,13 @@ class _PatientPickerField extends StatelessWidget {
   final Patient? selected;
   final List<Patient> patients;
   final ValueChanged<Patient> onChanged;
+  final bool enabled;
 
   const _PatientPickerField({
     required this.selected,
     required this.patients,
     required this.onChanged,
+    this.enabled = true,
   });
 
   Future<void> _open(BuildContext context) async {
@@ -899,30 +1149,32 @@ class _PatientPickerField extends StatelessWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _PatientSearchSheet(patients: patients, selected: selected),
+      builder: (_) => _PatientPickerSheet(patients: patients, selected: selected),
     );
     if (picked != null) onChanged(picked);
   }
 
   @override
   Widget build(BuildContext context) {
+    final bool canPick = enabled && patients.length > 1;
+
     return InkWell(
       borderRadius: BorderRadius.circular(10),
-      onTap: () => _open(context),
+      onTap: canPick ? () => _open(context) : null,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: enabled ? Colors.white : Colors.grey.shade100,
           borderRadius: BorderRadius.circular(10),
           border: Border.all(color: AppColors.divider),
         ),
         child: Row(
           children: [
-            const Icon(Icons.person_search_rounded, size: 18, color: AppColors.textSecondary),
+            const Icon(Icons.person_outline_rounded, size: 18, color: AppColors.textSecondary),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                selected != null ? '${selected!.fullName} — ${selected!.purok}' : 'Select a patient',
+                selected != null ? '${selected!.fullName} — ${_purokLabel(selected!.purok)}' : 'Select a patient',
                 style: TextStyle(
                   fontSize: 14,
                   fontWeight: selected != null ? FontWeight.w600 : FontWeight.w400,
@@ -931,7 +1183,8 @@ class _PatientPickerField extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            const Icon(Icons.unfold_more_rounded, size: 18, color: AppColors.textSecondary),
+            if (canPick)
+              const Icon(Icons.unfold_more_rounded, size: 18, color: AppColors.textSecondary),
           ],
         ),
       ),
@@ -939,41 +1192,18 @@ class _PatientPickerField extends StatelessWidget {
   }
 }
 
-class _PatientSearchSheet extends StatefulWidget {
+class _PatientPickerSheet extends StatelessWidget {
   final List<Patient> patients;
   final Patient? selected;
 
-  const _PatientSearchSheet({required this.patients, required this.selected});
-
-  @override
-  State<_PatientSearchSheet> createState() => _PatientSearchSheetState();
-}
-
-class _PatientSearchSheetState extends State<_PatientSearchSheet> {
-  final _searchController = TextEditingController();
-  String _query = '';
-
-  @override
-  void dispose() {
-    _searchController.dispose();
-    super.dispose();
-  }
-
-  List<Patient> get _filtered {
-    if (_query.isEmpty) return widget.patients;
-    final q = _query.toLowerCase();
-    return widget.patients.where((p) {
-      return p.fullName.toLowerCase().contains(q) || p.purok.toLowerCase().contains(q);
-    }).toList();
-  }
+  const _PatientPickerSheet({required this.patients, required this.selected});
 
   @override
   Widget build(BuildContext context) {
-    final filtered = _filtered;
     return DraggableScrollableSheet(
-      initialChildSize: 0.75,
-      minChildSize: 0.5,
-      maxChildSize: 0.92,
+      initialChildSize: 0.6,
+      minChildSize: 0.4,
+      maxChildSize: 0.85,
       expand: false,
       builder: (context, scrollController) {
         return Container(
@@ -993,7 +1223,7 @@ class _PatientSearchSheetState extends State<_PatientSearchSheet> {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
                 child: Row(
                   children: [
                     const Expanded(
@@ -1003,67 +1233,35 @@ class _PatientSearchSheetState extends State<_PatientSearchSheet> {
                       ),
                     ),
                     Text(
-                      '${widget.patients.length} patient${widget.patients.length != 1 ? "s" : ""}',
+                      '${patients.length} patient${patients.length != 1 ? "s" : ""}',
                       style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
                     ),
                   ],
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: TextField(
-                  controller: _searchController,
-                  autofocus: true,
-                  onChanged: (v) => setState(() => _query = v),
-                  decoration: InputDecoration(
-                    hintText: 'Search by name or purok...',
-                    prefixIcon: const Icon(Icons.search, size: 20),
-                    suffixIcon: _query.isNotEmpty
-                        ? IconButton(
-                            icon: const Icon(Icons.clear, size: 18),
-                            onPressed: () {
-                              _searchController.clear();
-                              setState(() => _query = '');
-                            },
-                          )
-                        : null,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
+              const Divider(height: 1, color: AppColors.divider),
               Expanded(
-                child: filtered.isEmpty
+                child: patients.isEmpty
                     ? const EmptyState(
-                        icon: Icons.person_search_rounded,
-                        title: 'No matching patients',
-                        subtitle: 'Try a different name or purok.',
+                        icon: Icons.people_outline_rounded,
+                        title: 'No patients found',
+                        subtitle: 'No assigned patients available.',
                       )
                     : ListView.builder(
                         controller: scrollController,
-                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
-                        itemCount: filtered.length,
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
+                        itemCount: patients.length,
                         itemBuilder: (_, i) {
-                          final p = filtered[i];
-                          final isSelected = p.id == widget.selected?.id;
+                          final p = patients[i];
+                          final isSelected = p.id == selected?.id;
                           return ListTile(
                             onTap: () => Navigator.pop(context, p),
-                            leading: CircleAvatar(
-                              backgroundColor: AppColors.primary.withValues(alpha: 0.12),
-                              child: Text(
-                                p.firstName[0].toUpperCase(),
-                                style: const TextStyle(
-                                  color: AppColors.primary,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
                             title: Text(
                               p.fullName,
                               style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
                             ),
                             subtitle: Text(
-                              '${p.age} yrs • ${p.sex} • ${p.purok}',
+                              '${p.age} yrs • ${p.sex} • ${_purokLabel(p.purok)}',
                               style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
                             ),
                             trailing: isSelected

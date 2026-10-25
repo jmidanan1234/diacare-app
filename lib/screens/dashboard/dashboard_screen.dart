@@ -7,7 +7,9 @@ import '../../models/user_model.dart';
 import '../../utils/theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/shared_widgets.dart';
+import '../../services/risk_classifier.dart';
 import '../records/add_record_screen.dart';
+import '../sync/sync_log_screen.dart';
 
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key});
@@ -30,7 +32,11 @@ class DashboardScreen extends StatelessWidget {
           // flips from true to false right after the screen first opens.
           body: Column(
             children: [
-              _DashboardHeroHeader(user: user, lastSyncTime: provider.lastSyncTime),
+              _DashboardHeroHeader(
+                user: user,
+                lastSyncTime: provider.lastSyncTime,
+                unsyncedCount: provider.unsyncedCount,
+              ),
               Expanded(
                 child: provider.isLoading
                     ? const _DashboardSkeleton()
@@ -201,7 +207,7 @@ class DashboardScreen extends StatelessWidget {
                             ],
                           ),
                           const SizedBox(height: 8),
-                          ...provider.recentRecords.take(5).map((r) {
+                          ...provider.recentRecords.map((r) {
                             final matches = provider.patients.where((p) => p.id == r.patientId);
                             final patientName = matches.isNotEmpty ? matches.first.fullName : 'Unknown patient';
                             return _RecentRecordRow(
@@ -238,8 +244,13 @@ class DashboardScreen extends StatelessWidget {
 class _DashboardHeroHeader extends StatelessWidget {
   final UserModel? user;
   final String? lastSyncTime;
+  final int unsyncedCount;
 
-  const _DashboardHeroHeader({required this.user, required this.lastSyncTime});
+  const _DashboardHeroHeader({
+    required this.user,
+    required this.lastSyncTime,
+    this.unsyncedCount = 0,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -286,16 +297,16 @@ class _DashboardHeroHeader extends StatelessWidget {
                 ),
               ),
             ),
-            // DiaCare's own watermark — the actual logo, rendered as a
-            // translucent white silhouette rather than a generic icon.
+            // DiaCare's watermark — the actual logo, fully contained and whole
             Positioned(
-              right: -18,
-              bottom: -14,
+              right: 12,
+              bottom: 8,
               child: Image.asset(
                 'assets/images/logo.png',
-                width: 128,
-                height: 128,
-                color: Colors.white.withValues(alpha: 0.10),
+                width: 105,
+                height: 105,
+                fit: BoxFit.contain,
+                color: Colors.white.withValues(alpha: 0.12),
                 colorBlendMode: BlendMode.srcIn,
               ),
             ),
@@ -306,18 +317,23 @@ class _DashboardHeroHeader extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Brand row — replaces the old flat AppBar title. Logo
-                    // sits on a white backdrop chip, same technique as
-                    // Login/Splash, so it stays crisp regardless of size.
+                    // Brand row — logo sits on a white backdrop chip so it stays whole and crisp
                     Row(
                       children: [
                         Container(
-                          width: 30,
-                          height: 30,
-                          padding: const EdgeInsets.all(5),
-                          decoration: const BoxDecoration(
+                          width: 34,
+                          height: 34,
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
                             color: Colors.white,
-                            shape: BoxShape.circle,
+                            borderRadius: BorderRadius.circular(10),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.08),
+                                blurRadius: 4,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
                           ),
                           child: Image.asset('assets/images/logo.png', fit: BoxFit.contain),
                         ),
@@ -332,30 +348,61 @@ class _DashboardHeroHeader extends StatelessWidget {
                           ),
                         ),
                         const Spacer(),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.14),
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                lastSyncTime != null ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
-                                size: 12,
-                                color: Colors.white,
+                        InkWell(
+                          borderRadius: BorderRadius.circular(20),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => const SyncLogScreen(),
                               ),
-                              const SizedBox(width: 4),
-                              Text(
-                                lastSyncTime != null ? 'Synced' : 'Not synced',
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w600,
+                            );
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: unsyncedCount > 0
+                                  ? AppColors.warning.withValues(alpha: 0.3)
+                                  : Colors.white.withValues(alpha: 0.16),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: unsyncedCount > 0
+                                    ? AppColors.warning.withValues(alpha: 0.7)
+                                    : Colors.white.withValues(alpha: 0.25),
+                                width: 1,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  unsyncedCount > 0
+                                      ? Icons.cloud_upload_outlined
+                                      : (lastSyncTime != null
+                                          ? Icons.cloud_done_rounded
+                                          : Icons.cloud_off_rounded),
+                                  size: 13,
+                                  color: unsyncedCount > 0
+                                      ? const Color(0xFFFFD54F)
+                                      : Colors.white,
                                 ),
-                              ),
-                            ],
+                                const SizedBox(width: 5),
+                                Text(
+                                  unsyncedCount > 0
+                                      ? '$unsyncedCount pending'
+                                      : (lastSyncTime != null
+                                          ? 'Synced'
+                                          : 'Not synced'),
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: unsyncedCount > 0
+                                        ? const Color(0xFFFFD54F)
+                                        : Colors.white,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ],
@@ -499,15 +546,6 @@ class _RecentRecordRow extends StatelessWidget {  final String patientName;
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             child: Row(
               children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: const BoxDecoration(
-                    color: AppColors.primarySoft,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.medical_services_outlined, size: 16, color: AppColors.primary),
-                ),
-                const SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -517,13 +555,21 @@ class _RecentRecordRow extends StatelessWidget {  final String patientName;
                         style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                       ),
                       Text(
-                        'Glucose: ${record.bloodGlucose.toStringAsFixed(0)} • BP: ${record.bloodPressure}',
+                        (record.bloodGlucose != null && record.bloodGlucose! > 0)
+                            ? 'Glucose: ${record.bloodGlucose!.toStringAsFixed(0)} • BP: ${record.bloodPressure}'
+                            : (record.bloodPressure != '—'
+                                ? 'BP: ${record.bloodPressure}'
+                                : 'Visit recorded'),
                         style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
                       ),
                     ],
                   ),
                 ),
-                RiskBadge(riskLevel: record.riskLevel, compact: true),
+                RiskBadge(
+                  riskLevel: record.riskLevel,
+                  compact: true,
+                  score: RiskClassifier.calculateRiskScore(record.bloodGlucose),
+                ),
               ],
             ),
           ),

@@ -5,6 +5,7 @@ import '../models/patient.dart';
 import '../models/health_record.dart';
 import '../models/notification_model.dart';
 import '../models/user_model.dart';
+import '../models/sync_log.dart';
 import '../services/auth_service.dart';
 import '../services/risk_classifier.dart';
 import '../services/sync_service.dart';
@@ -19,8 +20,8 @@ class AppProvider extends ChangeNotifier {
   final _uuid = const Uuid();
 
   List<Patient> _patients = [];
-  List<Patient> _pendingPatients = [];
   List<HealthRecord> _allRecords = [];
+  List<SyncLog> _syncLogs = [];
   int _totalRecordCount = 0;
   int _unsyncedCount = 0;
   List<NotificationModel> _notifications = [];
@@ -28,7 +29,14 @@ class AppProvider extends ChangeNotifier {
   bool _isLoading = false;
   int _selectedTab = 0;
 
+  /// Guards [_checkNoVisitAlerts] so two overlapping loadAll() calls
+  /// (e.g. pull-to-refresh right after a sync) can't both decide a patient
+  /// has no alert yet and each create one.
+  bool _checkingNoVisit = false;
+
   int get unsyncedCount => _unsyncedCount;
+  List<SyncLog> get syncLogs => _syncLogs;
+
   /// Set by a dashboard summary card tap, consumed once by PatientListScreen
   /// on its next build so the destination tab opens pre-filtered.
   String? _pendingPatientListFilter;
@@ -44,14 +52,23 @@ class AppProvider extends ChangeNotifier {
   }
 
   List<Patient> get patients => _patients;
-  /// Patients this BHW has submitted that are still awaiting BHN approval.
-  /// They're kept visible (read-only) so submissions never silently vanish.
-  List<Patient> get pendingPatients => _pendingPatients;
   List<HealthRecord> get allRecords => _allRecords;
+
   /// Small, most-recent-first slice for preview widgets (e.g. Dashboard's
   /// activity feed) — anywhere that needs the complete picture should use
-  /// [allRecords] instead.
-  List<HealthRecord> get recentRecords => _allRecords.take(20).toList();
+  /// [allRecords] instead. Returns latest record per patient.
+  List<HealthRecord> get recentRecords {
+    final seen = <String>{};
+    final result = <HealthRecord>[];
+    for (final r in _allRecords) {
+      if (seen.add(r.patientId)) {
+        result.add(r);
+        if (result.length >= 5) break;
+      }
+    }
+    return result;
+  }
+
   int get totalRecordCount => _totalRecordCount;
   List<NotificationModel> get notifications => _notifications;
   String? get lastSyncTime => _lastSyncTime;
@@ -60,17 +77,28 @@ class AppProvider extends ChangeNotifier {
   UserModel? get currentUser => _auth.currentUser;
 
   int get totalPatients => _patients.length;
-  int get highRiskCount => _patients.where((p) => p.riskLevel == AppConstants.riskHigh).length;
+  int get highRiskCount =>
+      _patients.where((p) => p.riskLevel == AppConstants.riskHigh).length;
   int get unreadNotifCount => _notifications.where((n) => !n.isRead).length;
 
+  /// Latest visit date per patient, computed in a single pass over
+  /// [_allRecords] (instead of re-filtering the full list for every patient).
+  Map<String, DateTime> _lastVisitByPatient() {
+    final m = <String, DateTime>{};
+    for (final r in _allRecords) {
+      final cur = m[r.patientId];
+      if (cur == null || r.visitDate.isAfter(cur)) m[r.patientId] = r.visitDate;
+    }
+    return m;
+  }
+
   int get unvisitedCount {
-    final cutoff = DateTime.now().subtract(const Duration(days: AppConstants.noVisitDays));
-    return _patients.where((p) {
-      final records = _allRecords.where((r) => r.patientId == p.id).toList();
-      if (records.isEmpty) return true;
-      records.sort((a, b) => b.visitDate.compareTo(a.visitDate));
-      return records.first.visitDate.isBefore(cutoff);
-    }).length;
+    final cutoff =
+        DateTime.now().subtract(const Duration(days: AppConstants.noVisitDays));
+    final last = _lastVisitByPatient();
+    return _patients
+        .where((p) => (last[p.id] ?? p.createdAt).isBefore(cutoff))
+        .length;
   }
 
   void setTab(int index) {
@@ -84,13 +112,32 @@ class AppProvider extends ChangeNotifier {
 
     final bhwId = currentUser!.id;
     final allPatients = await _db.getAllPatientsByBhw(bhwId);
-    _patients = allPatients.where((p) => p.status == 'Approved').toList();
-    _pendingPatients = allPatients.where((p) => p.status != 'Approved').toList();
+    /* No approval step: every patient this worker has registered counts,
+       whether or not the handset has synced them yet. 'Inactive' is the
+       one status still held back — that is a patient the RHU turned
+       away, and re-listing them would invite a duplicate registration. */
+    _patients = allPatients.where((p) => p.status != 'Inactive').toList();
     _allRecords = await _db.getAllRecordsByBhw(bhwId);
+
+    // Risk is glucose-only, so only a glucose reading counts as an
+    // assessment. A patient with no glucose reading on any visit (even if
+    // they have BP, weight, etc.) must not carry a risk label.
+    final assessedPatientIds = _allRecords
+        .where((r) => r.bloodGlucose != null && r.bloodGlucose! > 0)
+        .map((r) => r.patientId)
+        .toSet();
+    for (int i = 0; i < _patients.length; i++) {
+      if (!assessedPatientIds.contains(_patients[i].id) &&
+          _patients[i].riskLevel.isNotEmpty) {
+        _patients[i] = _patients[i].copyWith(riskLevel: '');
+        await _db.updatePatientRisk(_patients[i].id, '');
+      }
+    }
     _totalRecordCount = await _db.getTotalRecordCountByBhw(bhwId);
     _unsyncedCount = await _db.getUnsyncedCount(bhwId);
     _notifications = await _db.getNotificationsByBhw(bhwId);
     _lastSyncTime = await _sync.getLastSyncTime();
+    _syncLogs = await _sync.getSyncLogs(bhwId);
 
     _isLoading = false;
     notifyListeners();
@@ -100,45 +147,75 @@ class AppProvider extends ChangeNotifier {
     await _checkNoVisitAlerts(bhwId);
   }
 
-  Future<void> _checkNoVisitAlerts(String bhwId) async {
-    final cutoff = DateTime.now().subtract(const Duration(days: AppConstants.noVisitDays));
-    bool createdAny = false;
+  Future<void> loadSyncLogs() async {
+    if (currentUser == null) return;
+    _syncLogs = await _sync.getSyncLogs(currentUser!.id);
+    notifyListeners();
+  }
 
-    for (final patient in _patients) {
-      final records = await _db.getRecordsByPatient(patient.id);
-      DateTime? lastVisit;
-      if (records.isNotEmpty) {
-        records.sort((a, b) => b.visitDate.compareTo(a.visitDate));
-        lastVisit = records.first.visitDate;
+  /// Raises ONE "not visited" alert per overdue patient, and no more until
+  /// that patient is actually visited.
+  ///
+  /// Besides the database check, this also looks at the alerts already
+  /// loaded: if the patient already has a "not visited" alert created after
+  /// their last visit, a new one is not made — even if that alert has been
+  /// read. Without this, reading an alert could let a fresh copy appear on
+  /// the next refresh, so the same patient piled up one alert per day.
+  Future<void> _checkNoVisitAlerts(String bhwId) async {
+    if (_checkingNoVisit) return;
+    _checkingNoVisit = true;
+
+    try {
+      final cutoff = DateTime.now()
+          .subtract(const Duration(days: AppConstants.noVisitDays));
+      bool createdAny = false;
+
+      // _allRecords was just refreshed by loadAll, so reuse it rather than
+      // querying the database once per patient.
+      final last = _lastVisitByPatient();
+
+      for (final patient in _patients) {
+        final lastVisit = last[patient.id];
+        final referenceDate = lastVisit ?? patient.createdAt;
+        final isOverdue = referenceDate.isBefore(cutoff);
+        if (!isOverdue) continue;
+
+        // Already alerted since the last visit (read or unread)?
+        final alertedSinceLastVisit = _notifications.any((n) =>
+            n.patientId == patient.id &&
+            n.type == 'no_visit' &&
+            n.createdAt.isAfter(referenceDate));
+        if (alertedSinceLastVisit) continue;
+
+        final alreadyAlerted =
+            await _db.hasActiveNoVisitNotification(patient.id);
+        if (alreadyAlerted) continue;
+
+        final message = lastVisit == null
+            ? '${patient.fullName} has no recorded visits yet.'
+            : '${patient.fullName} has not been visited in ${AppConstants.noVisitDays}+ days.';
+
+        final notif = NotificationModel(
+          id: _uuid.v4(),
+          patientId: patient.id,
+          patientName: patient.fullName,
+          type: 'no_visit',
+          message: message,
+          isRead: false,
+          createdAt: DateTime.now(),
+        );
+        await _db.insertNotification(notif);
+        await _localNotif.showNoVisitAlert(
+            patientName: patient.fullName, message: message);
+        createdAny = true;
       }
 
-      final isOverdue = lastVisit == null || lastVisit.isBefore(cutoff);
-      if (!isOverdue) continue;
-
-      final alreadyAlerted = await _db.hasActiveNoVisitNotification(patient.id);
-      if (alreadyAlerted) continue;
-
-      final message = lastVisit == null
-          ? '${patient.fullName} has no recorded visits yet.'
-          : '${patient.fullName} has not been visited in ${AppConstants.noVisitDays}+ days.';
-
-      final notif = NotificationModel(
-        id: _uuid.v4(),
-        patientId: patient.id,
-        patientName: patient.fullName,
-        type: 'no_visit',
-        message: message,
-        isRead: false,
-        createdAt: DateTime.now(),
-      );
-      await _db.insertNotification(notif);
-      await _localNotif.showNoVisitAlert(patientName: patient.fullName, message: message);
-      createdAny = true;
-    }
-
-    if (createdAny) {
-      _notifications = await _db.getNotificationsByBhw(bhwId);
-      notifyListeners();
+      if (createdAny) {
+        _notifications = await _db.getNotificationsByBhw(bhwId);
+        notifyListeners();
+      }
+    } finally {
+      _checkingNoVisit = false;
     }
   }
 
@@ -146,12 +223,97 @@ class AppProvider extends ChangeNotifier {
     return await _db.getRecordsByPatient(patientId);
   }
 
-  Future<String> addHealthRecord({
+  /// Creates the Highly At Risk notification + local alert for a patient.
+  /// Shared by [addHealthRecord] and [updateHealthRecord] so a correction
+  /// that pushes a reading into the high band alerts exactly like a new visit.
+  ///
+  /// Risk is glucose-only, so the message is too. The wording follows the
+  /// same boundaries as [RiskClassifier.classify]: glucose below
+  /// [AppConstants.glucoseSevereLow] is "very low blood sugar" and above
+  /// [AppConstants.glucoseSevereHigh] is "very high blood sugar". Blood
+  /// pressure is deliberately not mentioned: it does not drive the label,
+  /// so naming it as a reason would be misleading.
+  Future<void> _raiseHighRiskAlert(
+    String patientId,
+    double? bloodGlucose,
+    DateTime at,
+  ) async {
+    // The patient may not be in the filtered list (e.g. marked Inactive),
+    // so fall back to a generic name rather than throwing.
+    final match = _patients.where((p) => p.id == patientId);
+    final name = match.isEmpty ? 'Patient' : match.first.fullName;
+
+    String reasonText = 'very serious readings';
+    if (bloodGlucose != null && bloodGlucose > 0) {
+      if (bloodGlucose < AppConstants.glucoseSevereLow) {
+        reasonText = 'very low blood sugar (${bloodGlucose.toInt()} mg/dL)';
+      } else if (bloodGlucose > AppConstants.glucoseSevereHigh) {
+        reasonText = 'very high blood sugar (${bloodGlucose.toInt()} mg/dL)';
+      }
+    }
+
+    final notif = NotificationModel(
+      id: _uuid.v4(),
+      patientId: patientId,
+      patientName: name,
+      type: 'high_risk',
+      message: '$name has $reasonText. Immediate follow-up recommended.',
+      isRead: false,
+      createdAt: at,
+    );
+    await _db.insertNotification(notif);
+    await _localNotif.showHighRiskAlert(
+      patientName: name,
+      message: notif.message,
+    );
+  }
+
+  Future<void> _raiseHighBpAlert(
+    String patientId,
+    double? systolicBP,
+    double? diastolicBP,
+    DateTime at,
+  ) async {
+    final match = _patients.where((p) => p.id == patientId);
+    final name = match.isEmpty ? 'Patient' : match.first.fullName;
+
+    final hasSys = systolicBP != null && systolicBP > 0;
+    final hasDia = diastolicBP != null && diastolicBP > 0;
+    final bpText = (hasSys && hasDia)
+        ? '${systolicBP.toInt()}/${diastolicBP.toInt()}'
+        : hasSys
+            ? '${systolicBP.toInt()}'
+            : hasDia
+                ? '${diastolicBP.toInt()}'
+                : '';
+
+    final notif = NotificationModel(
+      id: _uuid.v4(),
+      patientId: patientId,
+      patientName: name,
+      type: 'high_bp',
+      message:
+          '$name has high blood pressure ($bpText mmHg). Immediate follow-up recommended.',
+      isRead: false,
+      createdAt: at,
+    );
+    await _db.insertNotification(notif);
+    await _localNotif.showHighRiskAlert(
+      patientName: name,
+      message: notif.message,
+    );
+  }
+
+  Future<String?> addHealthRecord({
     required String patientId,
-    required double bloodGlucose,
-    required double systolicBP,
-    required double diastolicBP,
-    required double bmi,
+    double? bloodGlucose,
+    double? systolicBP,
+    double? diastolicBP,
+    double? bmi,
+    double? height,
+    double? weight,
+    double? temp,
+    String referral = 'none',
     required String medAdherence,
     bool insulinUse = false,
     String? medicationName,
@@ -159,10 +321,11 @@ class AppProvider extends ChangeNotifier {
     String? observations,
   }) async {
     final riskLevel = RiskClassifier.classify(
-      bloodGlucose: bloodGlucose,
-      systolicBP: systolicBP,
-      diastolicBP: diastolicBP,
-    );
+          bloodGlucose: bloodGlucose,
+          systolicBP: systolicBP,
+          diastolicBP: diastolicBP,
+        ) ??
+        '';
 
     final now = DateTime.now();
     final record = HealthRecord(
@@ -173,6 +336,10 @@ class AppProvider extends ChangeNotifier {
       systolicBP: systolicBP,
       diastolicBP: diastolicBP,
       bmi: bmi,
+      height: height,
+      weight: weight,
+      temp: temp,
+      referral: referral,
       medAdherence: medAdherence,
       insulinUse: insulinUse,
       medicationName: medicationName,
@@ -185,35 +352,142 @@ class AppProvider extends ChangeNotifier {
     );
 
     await _db.insertHealthRecord(record);
-    await _db.updatePatientRisk(patientId, riskLevel);
+    if (riskLevel.isNotEmpty) {
+      await _db.updatePatientRisk(patientId, riskLevel);
+    }
     // A visit was just logged, so any earlier "not visited in 7+ days"
     // alert for this patient is now stale — clear it rather than leaving
     // it sitting in Notifications claiming the patient still hasn't been seen.
     await _db.resolveNoVisitNotifications(patientId);
 
-    // Create notification if high risk
     if (riskLevel == AppConstants.riskHigh) {
-      final patient = _patients.firstWhere((p) => p.id == patientId);
-      final reason = bloodGlucose < AppConstants.glucoseLowRisk
-          ? 'a HYPOGLYCEMIC reading (${bloodGlucose.toInt()} mg/dL)'
-          : bloodGlucose >= AppConstants.glucoseHighRisk
-              ? 'a HYPERGLYCEMIC reading (${bloodGlucose.toInt()} mg/dL)'
-              : 'critical vitals';
-      final notif = NotificationModel(
-        id: _uuid.v4(),
-        patientId: patientId,
-        patientName: patient.fullName,
-        type: 'high_risk',
-        message:
-            '${patient.fullName} has been classified as HIGH RISK ($reason). Immediate follow-up recommended.',
-        isRead: false,
-        createdAt: now,
-      );
-      await _db.insertNotification(notif);
-      await _localNotif.showHighRiskAlert(
-        patientName: patient.fullName,
-        message: notif.message,
-      );
+      await _raiseHighRiskAlert(patientId, bloodGlucose, now);
+    }
+
+    // High blood pressure is a separate clinical concern. It does not
+    // change the glucose-based risk label, but a reading at or above the
+    // hypertension threshold still needs to reach the worker.
+    final hasSys = systolicBP != null && systolicBP > 0;
+    final hasDia = diastolicBP != null && diastolicBP > 0;
+    final highBp = (hasSys && systolicBP >= AppConstants.systolicHighRisk) ||
+        (hasDia && diastolicBP >= AppConstants.diastolicHighRisk);
+    if (highBp) {
+      await _raiseHighBpAlert(patientId, systolicBP, diastolicBP, now);
+    }
+
+    await loadAll();
+    return riskLevel;
+  }
+
+  /// Corrects an existing visit in place.
+  ///
+  /// The record keeps its id and its visit date — this is the same visit,
+  /// with the numbers fixed — but is marked unsynced so the correction
+  /// goes up on the next sync, and the patient's risk is recalculated
+  /// from the corrected reading.
+  ///
+  /// If the corrected visit is the patient's latest one, high-risk alerts
+  /// are kept consistent with it: a new alert is raised when the correction
+  /// makes the visit Highly At Risk, and stale high-risk alerts are resolved when
+  /// the correction brings it back down.
+  Future<String?> updateHealthRecord({
+    required HealthRecord original,
+    double? bloodGlucose,
+    double? systolicBP,
+    double? diastolicBP,
+    double? bmi,
+    double? height,
+    double? weight,
+    double? temp,
+    String referral = 'none',
+    required String medAdherence,
+    bool insulinUse = false,
+    String? medicationName,
+    String? dosage,
+    String? observations,
+  }) async {
+    final riskLevel = RiskClassifier.classify(
+          bloodGlucose: bloodGlucose,
+          systolicBP: systolicBP,
+          diastolicBP: diastolicBP,
+        ) ??
+        '';
+
+    final corrected = HealthRecord(
+      id: original.id,
+      patientId: original.patientId,
+      bhwId: original.bhwId,
+      bloodGlucose: bloodGlucose,
+      systolicBP: systolicBP,
+      diastolicBP: diastolicBP,
+      bmi: bmi,
+      height: height,
+      weight: weight,
+      temp: temp,
+      referral: referral,
+      medAdherence: medAdherence,
+      insulinUse: insulinUse,
+      medicationName: medicationName,
+      dosage: dosage,
+      observations: observations,
+      riskLevel: riskLevel,
+      visitDate: original.visitDate,
+      createdAt: original.createdAt,
+      updatedAt: DateTime.now(),
+      isSynced: false,
+    );
+
+    // insertHealthRecord is an upsert: the same id replaces the old row.
+    await _db.insertHealthRecord(corrected);
+
+    // Sort locally (on a copy) instead of trusting the DB's ordering.
+    final records = [...await _db.getRecordsByPatient(original.patientId)]
+      ..sort((a, b) => b.visitDate.compareTo(a.visitDate));
+    final latest = records.isEmpty ? null : records.first;
+
+    /* Risk on the patient reflects their latest CLASSIFIED visit (one with
+       a glucose reading). Correcting an older visit must not overwrite it
+       with a stale classification, and if the correction leaves the latest
+       visit without glucose, the patient falls back to the previous
+       classified visit — or to '' (not assessed) if there is none. This
+       matches what DatabaseHelper._reclassifyStoredRisk does on open. */
+    String patientRisk = '';
+    for (final r in records) {
+      if (r.riskLevel.isNotEmpty) {
+        patientRisk = r.riskLevel;
+        break;
+      }
+    }
+    await _db.updatePatientRisk(original.patientId, patientRisk);
+
+    // Keep alerts consistent, but only when the corrected visit is the
+    // latest one — fixing an old visit shouldn't raise or clear alerts
+    // about the patient's current state.
+    if (latest?.id == original.id) {
+      final wasHigh = original.riskLevel == AppConstants.riskHigh;
+      final isHigh = riskLevel == AppConstants.riskHigh;
+      if (isHigh && !wasHigh) {
+        await _raiseHighRiskAlert(
+            original.patientId, bloodGlucose, DateTime.now());
+      } else if (!isHigh && wasHigh) {
+        await _db.resolveHighRiskNotifications(original.patientId);
+      }
+
+      // BP alert runs independently of the glucose risk label.
+      final wasHighBp = (original.systolicBP != null &&
+              original.systolicBP! >= AppConstants.systolicHighRisk) ||
+          (original.diastolicBP != null &&
+              original.diastolicBP! >= AppConstants.diastolicHighRisk);
+      final isHighBp = (systolicBP != null &&
+              systolicBP >= AppConstants.systolicHighRisk) ||
+          (diastolicBP != null &&
+              diastolicBP >= AppConstants.diastolicHighRisk);
+      if (isHighBp && !wasHighBp) {
+        await _raiseHighBpAlert(
+            original.patientId, systolicBP, diastolicBP, DateTime.now());
+      } else if (!isHighBp && wasHighBp) {
+        await _db.resolveHighBpNotifications(original.patientId);
+      }
     }
 
     await loadAll();
@@ -225,8 +499,26 @@ class AppProvider extends ChangeNotifier {
     await loadAll();
   }
 
-  Future<bool> checkDuplicate(String firstName, String lastName, DateTime birthDate, String excludeId) async {
-    return await _db.isDuplicatePatient(firstName, lastName, birthDate, excludeId);
+  Future<void> updatePatient(Patient patient) async {
+    await _db.updatePatient(patient);
+    await loadAll();
+  }
+
+  Future<bool> checkDuplicate(String firstName, String lastName,
+      DateTime birthDate, String excludeId) async {
+    return await _db.isDuplicatePatient(
+        firstName, lastName, birthDate, excludeId);
+  }
+
+  /// Whoever already has this patient on the shared register, or null.
+  /// Only reachable online; see SyncService.findRemoteDuplicate.
+  Future<String?> checkRemoteDuplicate(
+      String firstName, String lastName, DateTime birthDate) {
+    return _sync.findRemoteDuplicate(
+      firstName: firstName,
+      lastName: lastName,
+      birthDate: birthDate,
+    );
   }
 
   Future<void> markNotificationRead(String id) async {
@@ -240,7 +532,8 @@ class AppProvider extends ChangeNotifier {
 
   Future<void> markAllNotificationsRead() async {
     await _db.markAllNotificationsRead(currentUser!.id);
-    _notifications = _notifications.map((n) => n.copyWith(isRead: true)).toList();
+    _notifications =
+        _notifications.map((n) => n.copyWith(isRead: true)).toList();
     notifyListeners();
   }
 
@@ -261,6 +554,11 @@ class AppProvider extends ChangeNotifier {
   Future<bool> changePassword(String current, String newPass) async {
     return await _auth.changePassword(current, newPass);
   }
+
+  /// Why the last password change failed — "incorrect password" reads very
+  /// differently from "no signal", and the screens used to show the first
+  /// message for both.
+  String? get lastAuthError => _auth.lastError;
 
   /// [photoPath] is null to remove the photo and revert to the initials avatar.
   Future<bool> updateProfilePhoto(String? photoPath) async {

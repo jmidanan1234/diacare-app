@@ -54,7 +54,7 @@ class NotificationsScreen extends StatelessWidget {
                       onTap: () {
                         provider.markNotificationRead(notifications[i].id);
                         final patientId = notifications[i].patientId;
-                        final all = [...provider.patients, ...provider.pendingPatients];
+                        final all = provider.patients;
                         final match = all.where((p) => p.id == patientId);
                         if (match.isNotEmpty) {
                           Navigator.push(
@@ -78,14 +78,24 @@ class _NotificationCard extends StatelessWidget {
 
   const _NotificationCard({required this.notification, required this.onTap});
 
-  Color get _color =>
-      notification.type == 'high_risk' ? AppColors.highRisk : AppColors.warning;
+Color get _color =>
+      notification.type == 'high_risk' ? AppColors.highRisk
+          : notification.type == 'high_bp' ? AppColors.highRisk
+          : notification.type == 'flagged' ? AppColors.accent
+          : AppColors.warning;
 
-  IconData get _icon =>
-      notification.type == 'high_risk' ? Icons.warning_rounded : Icons.schedule_rounded;
+ IconData get _icon =>
+      notification.type == 'high_risk' ? Icons.warning_rounded
+          : notification.type == 'high_bp' ? Icons.monitor_heart_rounded
+          : notification.type == 'flagged' ? Icons.flag_rounded
+          : Icons.schedule_rounded;
 
+  // "HIGHLY AT RISK" matches the wording used everywhere else in the app.
   String get _typeLabel =>
-      notification.type == 'high_risk' ? 'HIGH RISK ALERT' : 'VISIT OVERDUE';
+      notification.type == 'high_risk' ? 'HIGHLY AT RISK'
+          : notification.type == 'high_bp' ? 'HIGH BLOOD PRESSURE'
+          : notification.type == 'flagged' ? 'FLAGGED FOR FOLLOW-UP'
+          : 'VISIT OVERDUE';
 
   @override
   Widget build(BuildContext context) {
@@ -115,64 +125,64 @@ class _NotificationCard extends StatelessWidget {
                   child: Icon(_icon, color: _color, size: 20),
                 ),
                 const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: _color.withValues(alpha: 0.1),
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: Text(
-                                      _typeLabel,
-                                      style: TextStyle(
-                                        fontSize: 9,
-                                        fontWeight: FontWeight.w800,
-                                        color: _color,
-                                        letterSpacing: 0.5,
-                                      ),
-                                    ),
-                                  ),
-                                  const Spacer(),
-                                  if (!notification.isRead)
-                                    Container(
-                                      width: 8,
-                                      height: 8,
-                                      decoration: BoxDecoration(color: _color, shape: BoxShape.circle),
-                                    ),
-                                ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: _color.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              _typeLabel,
+                              style: TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w800,
+                                color: _color,
+                                letterSpacing: 0.5,
                               ),
-                              const SizedBox(height: 6),
-                              Text(
-                                notification.patientName,
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: notification.isRead ? FontWeight.w500 : FontWeight.w700,
-                                  color: AppColors.textPrimary,
-                                ),
-                              ),
-                              const SizedBox(height: 3),
-                              Text(
-                                notification.message,
-                                style: const TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.4),
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                _formatTime(notification.createdAt),
-                                style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
-                              ),
-                            ],
+                            ),
                           ),
+                          const Spacer(),
+                          if (!notification.isRead)
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(color: _color, shape: BoxShape.circle),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        notification.patientName,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: notification.isRead ? FontWeight.w500 : FontWeight.w700,
+                          color: AppColors.textPrimary,
                         ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        notification.message,
+                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.4),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        _formatTime(notification.createdAt),
+                        style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                      ),
+                    ],
                   ),
                 ),
-              ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 

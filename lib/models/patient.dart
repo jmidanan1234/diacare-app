@@ -5,7 +5,6 @@ class Patient {
   final String? middleName;
   final DateTime birthDate;
   final String sex;
-  final String address;
   final String barangay;
   final String purok;
   final String? contactNumber;
@@ -18,6 +17,12 @@ class Patient {
   final String assignedBhwId;
   final String status; // Pending, Approved, Inactive
   final String riskLevel;
+  /// Set by the RHU on the dashboard: a patient a nurse wants visited.
+  /// The app only reads these — the flag is the health unit's instruction
+  /// to the worker, and the worker's own sync must never clear it.
+  final bool flagged;
+  final String? flagReason;
+  final String? flagNotes;
   final DateTime createdAt;
   final DateTime updatedAt;
   final bool isSynced;
@@ -29,7 +34,6 @@ class Patient {
     this.middleName,
     required this.birthDate,
     required this.sex,
-    required this.address,
     required this.barangay,
     required this.purok,
     this.contactNumber,
@@ -42,6 +46,9 @@ class Patient {
     required this.assignedBhwId,
     required this.status,
     required this.riskLevel,
+    this.flagged = false,
+    this.flagReason,
+    this.flagNotes,
     required this.createdAt,
     required this.updatedAt,
     this.isSynced = false,
@@ -70,7 +77,6 @@ class Patient {
     String? middleName,
     DateTime? birthDate,
     String? sex,
-    String? address,
     String? barangay,
     String? purok,
     String? contactNumber,
@@ -82,6 +88,9 @@ class Patient {
     String? emergencyContactNumber,
     String? status,
     String? riskLevel,
+    bool? flagged,
+    String? flagReason,
+    String? flagNotes,
     DateTime? updatedAt,
     bool? isSynced,
   }) {
@@ -92,7 +101,6 @@ class Patient {
       middleName: middleName ?? this.middleName,
       birthDate: birthDate ?? this.birthDate,
       sex: sex ?? this.sex,
-      address: address ?? this.address,
       barangay: barangay ?? this.barangay,
       purok: purok ?? this.purok,
       contactNumber: contactNumber ?? this.contactNumber,
@@ -105,6 +113,9 @@ class Patient {
       assignedBhwId: assignedBhwId,
       status: status ?? this.status,
       riskLevel: riskLevel ?? this.riskLevel,
+      flagged: flagged ?? this.flagged,
+      flagReason: flagReason ?? this.flagReason,
+      flagNotes: flagNotes ?? this.flagNotes,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       isSynced: isSynced ?? this.isSynced,
@@ -119,7 +130,6 @@ class Patient {
       'middleName': middleName,
       'birthDate': birthDate.toIso8601String(),
       'sex': sex,
-      'address': address,
       'barangay': barangay,
       'purok': purok,
       'contactNumber': contactNumber,
@@ -132,6 +142,9 @@ class Patient {
       'assignedBhwId': assignedBhwId,
       'status': status,
       'riskLevel': riskLevel,
+      'flagged': flagged ? 1 : 0,
+      'flagReason': flagReason,
+      'flagNotes': flagNotes,
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
       'isSynced': isSynced ? 1 : 0,
@@ -139,30 +152,44 @@ class Patient {
   }
 
   factory Patient.fromMap(Map<String, dynamic> map) {
+    DateTime? parseDate(String? value) {
+      if (value == null || value.isEmpty) return null;
+      try {
+        return DateTime.parse(value);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    final birthDate = parseDate(map['birthDate']);
+    final createdAt = parseDate(map['createdAt']);
+    final updatedAt = parseDate(map['updatedAt']);
+    final diagnosisDate = parseDate(map['diagnosisDate']);
+
     return Patient(
       id: map['id'],
       firstName: map['firstName'],
       lastName: map['lastName'],
       middleName: map['middleName'],
-      birthDate: DateTime.parse(map['birthDate']),
+      birthDate: birthDate ?? DateTime(2000, 1, 1),
       sex: map['sex'],
-      address: map['address'],
       barangay: map['barangay'] ?? '',
-      purok: map['purok'],
+      purok: map['purok'] ?? '',
       contactNumber: map['contactNumber'],
-      diabetesType: map['diabetesType'],
-      diagnosisDate: map['diagnosisDate'] != null
-          ? DateTime.parse(map['diagnosisDate'])
-          : null,
+      diabetesType: map['diabetesType'] ?? 'Type 2',
+      diagnosisDate: diagnosisDate,
       medications: map['medications'],
       attendingPhysician: map['attendingPhysician'],
       emergencyContact: map['emergencyContact'],
       emergencyContactNumber: map['emergencyContactNumber'],
       assignedBhwId: map['assignedBhwId'],
       status: map['status'],
-      riskLevel: map['riskLevel'],
-      createdAt: DateTime.parse(map['createdAt']),
-      updatedAt: DateTime.parse(map['updatedAt']),
+      riskLevel: map['riskLevel'] ?? '',
+      flagged: map['flagged'] == 1,
+      flagReason: map['flagReason'],
+      flagNotes: map['flagNotes'],
+      createdAt: createdAt ?? DateTime.now(),
+      updatedAt: updatedAt ?? DateTime.now(),
       isSynced: map['isSynced'] == 1,
     );
   }

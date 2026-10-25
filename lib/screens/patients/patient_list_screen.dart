@@ -34,23 +34,21 @@ class _PatientListScreenState extends State<PatientListScreen> {
           p.fullName.toLowerCase().contains(_searchQuery.toLowerCase());
       bool matchRisk;
       if (_filterRisk == null) {
-        matchRisk = p.status == 'Approved'; // default view: approved patients only
-      } else if (_filterRisk == 'Pending') {
-        matchRisk = p.status != 'Approved';
+        // Every patient on the roster. There is no approval queue to
+        // hold anyone back from the default view any more.
+        matchRisk = true;
+      } else if (_filterRisk == 'Flagged') {
+        matchRisk = p.flagged;
       } else if (_filterRisk == 'NotVisited') {
-        if (p.status != 'Approved') {
-          matchRisk = false;
+        final records = allRecords.where((r) => r.patientId == p.id).toList();
+        if (records.isEmpty) {
+          matchRisk = true;
         } else {
-          final records = allRecords.where((r) => r.patientId == p.id).toList();
-          if (records.isEmpty) {
-            matchRisk = true;
-          } else {
-            records.sort((a, b) => b.visitDate.compareTo(a.visitDate));
-            matchRisk = records.first.visitDate.isBefore(cutoff);
-          }
+          records.sort((a, b) => b.visitDate.compareTo(a.visitDate));
+          matchRisk = records.first.visitDate.isBefore(cutoff);
         }
       } else {
-        matchRisk = p.status == 'Approved' && p.riskLevel == _filterRisk;
+        matchRisk = p.riskLevel == _filterRisk;
       }
       return matchSearch && matchRisk;
     }).toList();
@@ -71,7 +69,7 @@ class _PatientListScreenState extends State<PatientListScreen> {
             setState(() => _filterRisk = pending);
           }
         });
-        final allPatients = [...provider.patients, ...provider.pendingPatients];
+        final allPatients = provider.patients;
         final filtered = _filtered(allPatients, provider.allRecords);
 
         return Scaffold(
@@ -160,14 +158,19 @@ class _PatientListScreenState extends State<PatientListScreen> {
                             onTap: () => setState(() =>
                                 _filterRisk == 'NotVisited' ? _filterRisk = null : _filterRisk = 'NotVisited'),
                           ),
-                          if (provider.pendingPatients.isNotEmpty) ...[
+                          // Only offered when the RHU has actually asked
+                          // for a follow-up, so it does not sit there as
+                          // a chip that always finds nobody.
+                          if (allPatients.any((p) => p.flagged)) ...[
                             const SizedBox(width: 8),
                             _FilterChip(
-                              label: 'Pending (${provider.pendingPatients.length})',
-                              isSelected: _filterRisk == 'Pending',
-                              color: AppColors.warning,
-                              onTap: () => setState(() =>
-                                  _filterRisk == 'Pending' ? _filterRisk = null : _filterRisk = 'Pending'),
+                              label:
+                                  'Follow-up (${allPatients.where((p) => p.flagged).length})',
+                              isSelected: _filterRisk == 'Flagged',
+                              color: AppColors.accent,
+                              onTap: () => setState(() => _filterRisk == 'Flagged'
+                                  ? _filterRisk = null
+                                  : _filterRisk = 'Flagged'),
                             ),
                           ],
                         ],

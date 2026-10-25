@@ -11,6 +11,7 @@ import '../../services/auth_service.dart';
 import '../../utils/theme.dart';
 import '../../utils/constants.dart';
 import '../login_screen.dart';
+import '../sync/sync_log_screen.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -126,7 +127,7 @@ class ProfileScreen extends StatelessWidget {
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Text(
-                          user.role,
+                          user.role.toUpperCase(),
                           style: const TextStyle(
                             color: AppColors.primary,
                             fontSize: 12,
@@ -198,16 +199,14 @@ class ProfileScreen extends StatelessWidget {
 
                 // Settings
                 _SettingsSection(
-                  title: 'Sync',
+                  title: 'Sync & Pending Records',
                   children: [
                     _SettingsTile(
-                      icon: Icons.sync_rounded,
-                      title: 'Manual Sync',
+                      icon: Icons.history_rounded,
+                      title: 'Sync History & Logs',
                       subtitle: provider.unsyncedCount > 0
-                          ? '${provider.unsyncedCount} pending record(s) • Tap to sync'
-                          : (provider.lastSyncTime != null
-                              ? 'Last synced: ${DateFormat('MMM d, y • hh:mm a').format(DateTime.parse(provider.lastSyncTime!))}'
-                              : 'Never synced'),
+                          ? '${provider.unsyncedCount} pending • View pending records & logs'
+                          : 'View pending records & sync attempt history',
                       trailing: provider.unsyncedCount > 0
                           ? Container(
                               padding: const EdgeInsets.symmetric(
@@ -232,6 +231,28 @@ class ProfileScreen extends StatelessWidget {
                               size: 20,
                               color: AppColors.textSecondary,
                             ),
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const SyncLogScreen(),
+                          ),
+                        );
+                      },
+                    ),
+                    _SettingsTile(
+                      icon: Icons.sync_rounded,
+                      title: 'Manual Sync',
+                      subtitle: provider.unsyncedCount > 0
+                          ? '${provider.unsyncedCount} pending record(s) • Tap to sync'
+                          : (provider.lastSyncTime != null
+                              ? 'Last synced: ${DateFormat('MMM d, y • hh:mm a').format(DateTime.parse(provider.lastSyncTime!))}'
+                              : 'Never synced'),
+                      trailing: const Icon(
+                        Icons.chevron_right,
+                        size: 20,
+                        color: AppColors.textSecondary,
+                      ),
                       onTap: () async {
                         final result = await provider.syncAll();
                         if (context.mounted) {
@@ -463,7 +484,10 @@ class ProfileScreen extends StatelessWidget {
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
-                            content: Text(success ? 'Password changed.' : 'Current password is incorrect.'),
+                            content: Text(success
+                                ? 'Password changed.'
+                                : provider.lastAuthError ??
+                                    'Current password is incorrect.'),
                             backgroundColor: success ? AppColors.success : AppColors.error,
                           ),
                         );

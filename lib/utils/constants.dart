@@ -11,7 +11,6 @@ class AppConstants {
   static const String riskHigh = 'Highly At Risk';
 
   // Patient Status
-  static const String statusPending = 'Pending Approval';
   static const String statusApproved = 'Approved';
   static const String statusInactive = 'Inactive';
 
@@ -26,12 +25,40 @@ class AppConstants {
   // Sex options
   static const List<String> sexOptions = ['Male', 'Female', 'Other'];
 
-  // Risk thresholds — match this project's documented risk model exactly:
-  // Glucose: <70 or ≥250 mg/dL = Highly At Risk; 180–249 = At Risk; 70–179 = Normal.
-  // BP: ≥140/90 = Highly At Risk; 120–139/80–89 = At Risk.
-  static const double glucoseLowRisk = 70.0; // below this = hypoglycemia (urgent)
-  static const double glucoseNormalMax = 180.0;
-  static const double glucoseHighRisk = 250.0;
+  // The 40 barangays of Libon, Albay — the RHU's catchment. Same list,
+  // same spelling, as the dashboard's patients-schema.js BARANGAYS, so a
+  // patient registered here filters and reports correctly there. A
+  // dropdown rather than free text: "San Jose", "Brgy. San Jose" and
+  // "san jose" were three different barangays to a report.
+  static const List<String> barangays = [
+    'Alongong', 'Apud', 'Bacolod', 'Bariw', 'Bonbon', 'Buga', 'Bulusan',
+    'Burabod', 'Caguscos', 'East Carisac', 'West Carisac', 'Harigue',
+    'Libtong', 'Linao', 'Mabayawas', 'Macabugos', 'Magallang', 'Malabiga',
+    'Marayag', 'Matara', 'Molosbolos', 'Natasan', 'Niño Jesus', 'Nogpo',
+    'Pantao', 'Rawis', 'Sagrada Familia', 'Salvacion', 'Sampongan',
+    'San Agustin', 'San Antonio', 'San Isidro', 'San Jose', 'San Pascual',
+    'San Ramon', 'San Vicente', 'Santa Cruz', 'Talin-talin', 'Tambo',
+    'Villa Petrona',
+  ];
+
+  // Risk thresholds — validated ADA 2026 §6 (Tables 6.2 / 6.4).
+  // These drive the CURRENT (rule-based) risk level of a single visit.
+  //
+  // Glucose (mg/dL):
+  //   70–180   Normal (target range)
+  //   181–250  At Risk         (Level 1 hyperglycemia)
+  //   > 250    Highly At Risk  (Level 2 hyperglycemia)
+  //   54–69    At Risk         (Level 1 hypoglycemia)
+  //   < 54     Highly At Risk  (Level 2 hypoglycemia)
+  static const double glucoseSevereLow = 54.0;   // below this = Highly At Risk
+  static const double glucoseTargetMin = 70.0;   // below this = At Risk
+  static const double glucoseTargetMax = 180.0;  // above this = At Risk
+  static const double glucoseSevereHigh = 250.0; // above this = Highly At Risk
+
+  // Blood pressure (mmHg). These are LOWER bounds: a reading at or above
+  // the value triggers that tier (either number is enough).
+  //   ≥140 systolic or ≥90 diastolic  = Highly At Risk
+  //   ≥120 systolic or ≥80 diastolic  = At Risk
   static const double systolicNormalMax = 120.0;
   static const double systolicHighRisk = 140.0;
   static const double diastolicNormalMax = 80.0;

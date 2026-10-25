@@ -37,7 +37,7 @@ class _RecordsScreenState extends State<RecordsScreen> {
         // Full history, not just a recent-activity slice — with enough
         // patients and visits, capping this list silently hides older
         // records instead of just being slower to scroll through.
-        final allPatients = [...provider.patients, ...provider.pendingPatients];
+        final allPatients = provider.patients;
         final nameById = {for (final p in allPatients) p.id: p.fullName};
         final records = _filtered(provider.allRecords, nameById);
 
@@ -52,7 +52,7 @@ class _RecordsScreenState extends State<RecordsScreen> {
                 onPressed: () {
                   if (provider.patients.isEmpty) {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text(provider.pendingPatients.isNotEmpty ? 'No approved patients yet — you have ${provider.pendingPatients.length} pending BHN approval.' : 'No approved patients assigned yet.')),
+                      const SnackBar(content: Text('No patients yet — add one first, then log a visit.')),
                     );
                     return;
                   }
@@ -123,7 +123,7 @@ class _RecordsScreenState extends State<RecordsScreen> {
                                     onPressed: () {
                                       if (provider.patients.isEmpty) {
                                         ScaffoldMessenger.of(context).showSnackBar(
-                                          SnackBar(content: Text(provider.pendingPatients.isNotEmpty ? 'No approved patients yet — you have ${provider.pendingPatients.length} pending BHN approval.' : 'No approved patients assigned yet.')),
+                                          const SnackBar(content: Text('No patients yet — add one first, then log a visit.')),
                                         );
                                         return;
                                       }

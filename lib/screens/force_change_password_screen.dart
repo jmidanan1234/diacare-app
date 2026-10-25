@@ -63,7 +63,8 @@ class _ForceChangePasswordScreenState extends State<ForceChangePasswordScreen> {
     } else {
       setState(() {
         _isLoading = false;
-        _errorMessage = 'Could not update your password. Please try again.';
+        _errorMessage = AuthService().lastError ??
+            'Could not update your password. Please try again.';
       });
     }
   }
