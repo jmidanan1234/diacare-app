@@ -52,30 +52,27 @@ void main() {
     });
 
     test('At Risk when glucose is 54-69 mg/dL (Level 1 hypoglycemia)', () {
-      final risk = RiskClassifier.classify(
-        bloodGlucose: 65,
-        systolicBP: 120,
-        diastolicBP: 80,
-      );
-      expect(risk, equals(AppConstants.riskModerate));
+      expect(RiskClassifier.classify(bloodGlucose: 54), equals(AppConstants.riskModerate));
+      expect(RiskClassifier.classify(bloodGlucose: 65), equals(AppConstants.riskModerate));
+      expect(RiskClassifier.classify(bloodGlucose: 69), equals(AppConstants.riskModerate));
     });
 
     test('At Risk when glucose is 181-250 mg/dL (Level 1 hyperglycemia)', () {
-      final risk = RiskClassifier.classify(
-        bloodGlucose: 200,
-        systolicBP: 120,
-        diastolicBP: 80,
-      );
-      expect(risk, equals(AppConstants.riskModerate));
+      expect(RiskClassifier.classify(bloodGlucose: 181), equals(AppConstants.riskModerate));
+      expect(RiskClassifier.classify(bloodGlucose: 200), equals(AppConstants.riskModerate));
+      expect(RiskClassifier.classify(bloodGlucose: 250), equals(AppConstants.riskModerate));
+    });
+
+    test('Highly At Risk when glucose < 54 or > 250 mg/dL', () {
+      expect(RiskClassifier.classify(bloodGlucose: 53), equals(AppConstants.riskHigh));
+      expect(RiskClassifier.classify(bloodGlucose: 251), equals(AppConstants.riskHigh));
     });
 
     test('Normal when glucose is within target range 70-180 mg/dL', () {
-      final risk = RiskClassifier.classify(
-        bloodGlucose: 150,
-        systolicBP: 120,
-        diastolicBP: 80,
-      );
-      expect(risk, equals(AppConstants.riskNormal));
+      expect(RiskClassifier.classify(bloodGlucose: 70), equals(AppConstants.riskNormal));
+      expect(RiskClassifier.classify(bloodGlucose: 125), equals(AppConstants.riskNormal));
+      expect(RiskClassifier.classify(bloodGlucose: 150), equals(AppConstants.riskNormal));
+      expect(RiskClassifier.classify(bloodGlucose: 180), equals(AppConstants.riskNormal));
     });
 
     test('Normal Risk when all vitals are optimal', () {
