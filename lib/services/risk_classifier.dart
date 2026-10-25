@@ -222,33 +222,54 @@ class RiskClassifier {
     );
   }
 
-  /// Determine trend from a list of glucose readings (newest first).
+  /// mg/dL beyond the target range (70–180): negative below, positive above,
+  /// 0 when inside the range.
+  static double _signedExcursion(double glucose) {
+    final min = AppConstants.glucoseTargetMin.toDouble();
+    final max = AppConstants.glucoseTargetMax.toDouble();
+    if (glucose < min) return glucose - min;
+    if (glucose > max) return glucose - max;
+    return 0;
+  }
+
+  /// Trend badge from a list of glucose readings (NEWEST FIRST).
   ///
-  /// Mirrors computeTrend() in the dashboard's patients-schema.js exactly:
-  ///   • Takes the 3 newest readings that have a valid glucose value.
-  ///   • Fewer than 3 → 'Stable' (not enough data to call a direction).
-  ///   • Computes the risk score for the newest and oldest of the 3.
-  ///   • A score change ≥ +10 → 'Worsening'; ≤ −10 → 'Improving'.
-  ///   • Changes within ±10 points stay 'Stable' (dead-band to avoid
-  ///     flipping the badge over small fluctuations).
+  /// Risk classification uses the ADA 2026 §6 thresholds. The trend badge is
+  /// an app-defined heuristic built on the same target range (70–180 mg/dL);
+  /// it is not defined by the ADA and its dead-band is not clinically
+  /// validated.
   ///
-  /// Using the continuous 0–100 score (not tier ranks) means a glucose
-  /// moving from 178 → 182 mg/dL — which crosses the Normal/At Risk
-  /// boundary — is treated the same way as the dashboard: only a
-  /// significant score shift changes the badge.
+  /// 1. Take the 3 newest valid readings (fewer than 3 -> 'Stable').
+  /// 2. Measure how far the newest and oldest of the 3 lie outside the
+  ///    target range (0 if inside).
+  /// 3. Swung across the range (low <-> high) by >= 15 mg/dL -> 'Worsening'.
+  /// 4. Otherwise compare distance outside the range:
+  ///      grew by >= 15 mg/dL   -> 'Worsening'
+  ///      shrank by >= 15 mg/dL -> 'Improving'
+  ///      else                  -> 'Stable'
+  ///
+  /// Readings that stay inside 70–180 are always 'Stable'.
+  /// Must stay identical to computeTrend() in the dashboard's schema file.
   static String getTrend(List<double?> glucoseReadings) {
-    final scores = glucoseReadings
+    final values = glucoseReadings
         .where((g) => g != null && g > 0)
         .take(3)
-        .map((g) => calculateRiskScore(g))
-        .whereType<int>()
+        .map((g) => g!)
         .toList();
+    if (values.length < 3) return 'Stable';
 
-    if (scores.length < 3) return 'Stable';
+    final newest = _signedExcursion(values.first);
+    final oldest = _signedExcursion(values.last);
+    const deadBand = 15.0; // mg/dL, not clinically validated
 
-    final change = scores[0] - scores[2]; // newest minus oldest of the 3
-    if (change >= 10) return 'Worsening';
-    if (change <= -10) return 'Improving';
+    // Crossed from one side of the range to the other by a meaningful amount.
+    if (newest * oldest < 0 && newest.abs() + oldest.abs() >= deadBand) {
+      return 'Worsening';
+    }
+
+    final change = newest.abs() - oldest.abs();
+    if (change >= deadBand) return 'Worsening';
+    if (change <= -deadBand) return 'Improving';
     return 'Stable';
   }
 

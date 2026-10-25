@@ -34,6 +34,10 @@ class AppColors {
   static const textSecondary = Color(0xFF66757C);
   static const textMuted = Color(0xFF9AA6AB);
 
+  // Trend badge colors
+  static const trendStable = Color(0xFF6B7280);
+  static const trendStableBg = Color(0xFFF3F4F6);
+
   static const divider = Color(0xFFE6ECEA);
   static const cardBorder = Color(0xFFEBF0EF);
 

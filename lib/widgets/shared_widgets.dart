@@ -619,9 +619,21 @@ class TrendChip extends StatelessWidget {
       case 'Improving':
         return AppColors.success;
       case 'Worsening':
-        return AppColors.error;
+        return AppColors.highRisk;
       default:
-        return AppColors.warning;
+        return AppColors.trendStable;
+    }
+  }
+
+  Color get _backgroundColor {
+    if (_stillHighRisk) return AppColors.highRisk.withValues(alpha: 0.1);
+    switch (trend) {
+      case 'Improving':
+        return AppColors.success.withValues(alpha: 0.1);
+      case 'Worsening':
+        return AppColors.highRisk.withValues(alpha: 0.1);
+      default:
+        return AppColors.trendStableBg;
     }
   }
 
@@ -642,7 +654,7 @@ class TrendChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.only(left: 5, right: 11, top: 4, bottom: 4),
       decoration: BoxDecoration(
-        color: _color.withValues(alpha: 0.1),
+        color: _backgroundColor,
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
