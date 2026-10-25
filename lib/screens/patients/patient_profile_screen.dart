@@ -233,7 +233,12 @@ class _PatientProfileScreenState extends State<PatientProfileScreen>
                         riskLevel: _currentRisk,
                         score: _currentRiskScore,
                       ),
-                      TrendChip(trend: _trend, riskLevel: _currentRisk),
+                      TrendChip(
+                        trend: _trend,
+                        riskLevel: _currentRisk,
+                        glucoseReadings: _records.map((r) => r.bloodGlucose).toList(),
+                        compact: true,
+                      ),
                     ],
                     if (_isUnvisited)
                       Container(
@@ -676,6 +681,8 @@ class _TrendsTab extends StatelessWidget {
               TrendChip(
                 trend: trend,
                 riskLevel: latestClassified?.riskLevel,
+                glucoseReadings: records.map((r) => r.bloodGlucose).toList(),
+                compact: false,
               ),
             ],
           ),

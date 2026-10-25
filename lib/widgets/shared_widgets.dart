@@ -606,7 +606,27 @@ class TrendChip extends StatelessWidget {
   /// so the chip shows "Still High Risk" in the high-risk color instead.
   final String? riskLevel;
 
-  const TrendChip({super.key, required this.trend, this.riskLevel});
+  /// Optional: count of valid glucose readings (glucose != null && glucose > 0),
+  /// or pass [glucoseReadings].
+  final int? validReadingCount;
+
+  /// Optional: list of glucose readings to count valid readings from.
+  final List<double?>? glucoseReadings;
+
+  /// In compact spots (such as the profile header chip next to the risk badge),
+  /// long text does not fit, so when readings < 3 the badge is simply hidden.
+  /// In non-compact spots (such as the "Overall Trend:" row), when readings == 2
+  /// the helper text "Not enough data (needs 3 readings)" is displayed.
+  final bool compact;
+
+  const TrendChip({
+    super.key,
+    required this.trend,
+    this.riskLevel,
+    this.validReadingCount,
+    this.glucoseReadings,
+    this.compact = false,
+  });
 
   bool get _stillHighRisk =>
       trend == 'Stable' && riskLevel == AppConstants.riskHigh;
@@ -651,6 +671,30 @@ class TrendChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final count = validReadingCount ??
+        (glucoseReadings != null
+            ? RiskClassifier.countValidGlucose(glucoseReadings!)
+            : null);
+
+    if (count != null) {
+      if (count < 2) {
+        return const SizedBox.shrink();
+      }
+      if (count == 2) {
+        if (compact) {
+          return const SizedBox.shrink();
+        }
+        return const Text(
+          'Not enough data (needs 3 readings)',
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.normal,
+            color: AppColors.textSecondary,
+          ),
+        );
+      }
+    }
+
     return Container(
       padding: const EdgeInsets.only(left: 5, right: 11, top: 4, bottom: 4),
       decoration: BoxDecoration(

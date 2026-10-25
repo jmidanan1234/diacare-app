@@ -273,6 +273,16 @@ class RiskClassifier {
     return 'Stable';
   }
 
+  /// Counts valid glucose readings (non-null and > 0), matching the trend filter.
+  static int countValidGlucose(Iterable<double?> readings) {
+    return readings.where((g) => g != null && g > 0).length;
+  }
+
+  /// Whether there are at least 3 valid glucose readings to display a trend badge.
+  static bool hasEnoughTrendData(Iterable<double?> readings) {
+    return countValidGlucose(readings) >= 3;
+  }
+
   // ── Validators ────────────────────────────────────────────────────────────
 
   static String? validateBloodGlucose(String? value) {

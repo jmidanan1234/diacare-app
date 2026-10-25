@@ -1,5 +1,7 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:diacare/services/risk_classifier.dart';
+import 'package:diacare/widgets/shared_widgets.dart';
 
 void main() {
   group('RiskClassifier.getTrend - excursion-based glucose trend tests', () {
@@ -45,6 +47,94 @@ void main() {
     test('Changes within dead-band (< 15 mg/dL) return Stable', () {
       // Oldest = 190 (excursion +10), Newest = 200 (excursion +20). Change = +10 < 15
       expect(RiskClassifier.getTrend([200.0, 195.0, 190.0]), 'Stable');
+    });
+
+    test('countValidGlucose ignores null and zero values', () {
+      expect(RiskClassifier.countValidGlucose([]), 0);
+      expect(RiskClassifier.countValidGlucose([null, 0.0]), 0);
+      expect(RiskClassifier.countValidGlucose([120.0, null, 0.0]), 1);
+      expect(RiskClassifier.countValidGlucose([120.0, 110.0]), 2);
+      expect(RiskClassifier.countValidGlucose([120.0, 110.0, 130.0]), 3);
+    });
+
+    test('hasEnoughTrendData requires at least 3 valid readings', () {
+      expect(RiskClassifier.hasEnoughTrendData([]), false);
+      expect(RiskClassifier.hasEnoughTrendData([120.0]), false);
+      expect(RiskClassifier.hasEnoughTrendData([120.0, 110.0]), false);
+      expect(RiskClassifier.hasEnoughTrendData([120.0, 110.0, 130.0]), true);
+      expect(RiskClassifier.hasEnoughTrendData([120.0, null, 110.0, 130.0]), true);
+    });
+  });
+
+  group('TrendChip display tests for valid reading count', () {
+    testWidgets('0 or 1 reading does NOT display trend badge or text', (tester) async {
+      // 0 readings
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(
+          body: TrendChip(
+            trend: 'Stable',
+            glucoseReadings: [],
+            compact: false,
+          ),
+        ),
+      ));
+      expect(find.text('Stable'), findsNothing);
+      expect(find.text('Not enough data (needs 3 readings)'), findsNothing);
+
+      // 1 reading
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(
+          body: TrendChip(
+            trend: 'Stable',
+            glucoseReadings: [120.0],
+            compact: false,
+          ),
+        ),
+      ));
+      expect(find.text('Stable'), findsNothing);
+      expect(find.text('Not enough data (needs 3 readings)'), findsNothing);
+    });
+
+    testWidgets('Exactly 2 readings displays text in non-compact spot, hides in compact spot', (tester) async {
+      // Compact spot (profile header): hidden, no badge, no text
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(
+          body: TrendChip(
+            trend: 'Stable',
+            glucoseReadings: [120.0, 110.0],
+            compact: true,
+          ),
+        ),
+      ));
+      expect(find.text('Stable'), findsNothing);
+      expect(find.text('Not enough data (needs 3 readings)'), findsNothing);
+
+      // Non-compact spot (Trends tab "Overall Trend:" row): displays helper text, no badge
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(
+          body: TrendChip(
+            trend: 'Stable',
+            glucoseReadings: [120.0, 110.0],
+            compact: false,
+          ),
+        ),
+      ));
+      expect(find.text('Stable'), findsNothing);
+      expect(find.text('Not enough data (needs 3 readings)'), findsOneWidget);
+    });
+
+    testWidgets('3 or more readings displays the trend badge normally', (tester) async {
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(
+          body: TrendChip(
+            trend: 'Stable',
+            glucoseReadings: [120.0, 110.0, 115.0],
+            compact: false,
+          ),
+        ),
+      ));
+      expect(find.text('Stable'), findsOneWidget);
+      expect(find.text('Not enough data (needs 3 readings)'), findsNothing);
     });
   });
 }
