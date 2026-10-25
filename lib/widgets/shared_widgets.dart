@@ -687,10 +687,11 @@ class TrendChip extends StatelessWidget {
         return const Text(
           'Not enough data (needs 3 readings)',
           style: TextStyle(
-            fontSize: 13,
+            fontSize: 12,
             fontWeight: FontWeight.normal,
             color: AppColors.textSecondary,
           ),
+          softWrap: true,
         );
       }
     }

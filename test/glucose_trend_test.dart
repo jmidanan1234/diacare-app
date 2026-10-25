@@ -136,5 +136,34 @@ void main() {
       expect(find.text('Stable'), findsOneWidget);
       expect(find.text('Not enough data (needs 3 readings)'), findsNothing);
     });
+
+    testWidgets('TrendChip with 2 readings in a narrow row does not overflow', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 320,
+            child: Row(
+              children: const [
+                Text('Overall Trend:'),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: TrendChip(
+                      trend: 'Stable',
+                      glucoseReadings: [120.0, 110.0],
+                      compact: false,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ));
+      expect(tester.takeException(), isNull);
+      expect(find.text('Not enough data (needs 3 readings)'), findsOneWidget);
+    });
   });
 }
+

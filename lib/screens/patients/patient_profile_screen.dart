@@ -668,21 +668,27 @@ class _TrendsTab extends StatelessWidget {
       children: [
         // Trend summary
         Container(
-          padding: const EdgeInsets.all(14),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: AppColors.cardBorder),
           ),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               const Text('Overall Trend:', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-              const SizedBox(width: 10),
-              TrendChip(
-                trend: trend,
-                riskLevel: latestClassified?.riskLevel,
-                glucoseReadings: records.map((r) => r.bloodGlucose).toList(),
-                compact: false,
+              const SizedBox(width: 8),
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: TrendChip(
+                    trend: trend,
+                    riskLevel: latestClassified?.riskLevel,
+                    glucoseReadings: records.map((r) => r.bloodGlucose).toList(),
+                    compact: false,
+                  ),
+                ),
               ),
             ],
           ),
