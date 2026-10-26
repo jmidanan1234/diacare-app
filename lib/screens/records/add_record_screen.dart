@@ -208,7 +208,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
       _observationsController.text = r.observations ?? '';
       _insulinUse = r.insulinUse;
       _medAdherence = _adherenceFromValue(r.medAdherence);
-      _calculatedBmi = r.bmi;
+      _calculatedBmi = r.bmi != null ? double.parse(r.bmi!.toStringAsFixed(2)) : null;
       _classifiedRisk = r.riskLevel.isEmpty ? null : r.riskLevel;
     }
 
@@ -273,10 +273,17 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   }
 
   void _computeBmi() {
-    final h = double.tryParse(_heightController.text);
-    final w = double.tryParse(_weightController.text);
+    final hText = _heightController.text.trim();
+    final wText = _weightController.text.trim();
+    if (hText.startsWith('-') || wText.startsWith('-')) {
+      setState(() => _calculatedBmi = null);
+      _previewRisk();
+      return;
+    }
+    final h = double.tryParse(hText);
+    final w = double.tryParse(wText);
     setState(() {
-      _calculatedBmi = (h != null && w != null && h > 0)
+      _calculatedBmi = (h != null && w != null && h > 0 && w > 0)
           ? RiskClassifier.calculateBmi(h, w)
           : null;
     });
@@ -284,10 +291,20 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   }
 
   void _previewRisk() {
-    final g = double.tryParse(_glucoseController.text);
-    final s = double.tryParse(_systolicController.text);
-    final d = double.tryParse(_diastolicController.text);
-    if (g == null || s == null || d == null) return;
+    final gText = _glucoseController.text.trim();
+    final sText = _systolicController.text.trim();
+    final dText = _diastolicController.text.trim();
+    if (gText.startsWith('-') || sText.startsWith('-') || dText.startsWith('-')) {
+      setState(() => _classifiedRisk = null);
+      return;
+    }
+    final g = double.tryParse(gText);
+    final s = double.tryParse(sText);
+    final d = double.tryParse(dText);
+    if (g == null || s == null || d == null || g <= 0 || s <= 0 || d <= 0) {
+      setState(() => _classifiedRisk = null);
+      return;
+    }
     final risk = RiskClassifier.classify(
       bloodGlucose: g,
       systolicBP: s,
@@ -417,9 +434,9 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
       child: TextFormField(
         controller: controller,
         focusNode: focusNode,
-        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
         inputFormatters: [
-          FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+          FilteringTextInputFormatter.allow(RegExp(r'[0-9.-]')),
           LengthLimitingTextInputFormatter(maxLength),
         ],
         onChanged: (_) {
@@ -654,7 +671,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                                       color: _bmiColor(_calculatedBmi!)),
                                   const SizedBox(width: 8),
                                   Text(
-                                    'BMI: ${_calculatedBmi!.toStringAsFixed(1)}',
+                                    'BMI: ${_calculatedBmi!.toStringAsFixed(2)}',
                                     style: TextStyle(
                                       fontWeight: FontWeight.w700,
                                       fontSize: 14,

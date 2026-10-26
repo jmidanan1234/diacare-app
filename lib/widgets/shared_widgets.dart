@@ -38,9 +38,11 @@ class RiskBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final trimmed = riskLevel.trim().toLowerCase();
-    if (trimmed.isEmpty || trimmed == 'none' || trimmed == 'no data' || trimmed == 'n/a') {
-      return const SizedBox.shrink();
-    }
+    final isUnassessed = trimmed.isEmpty || trimmed == 'none' || trimmed == 'no data' || trimmed == 'n/a' || trimmed == 'not assessed';
+    final effectiveColor = isUnassessed ? Colors.grey.shade600 : _color;
+    final effectiveIcon = isUnassessed ? Icons.help_outline_rounded : _icon;
+    final effectiveLabel = isUnassessed ? 'Not Assessed' : (score != null ? '$riskLevel • $score%' : riskLevel);
+
     return Container(
       padding: EdgeInsets.only(
         left: compact ? 4 : 5,
@@ -49,7 +51,7 @@ class RiskBadge extends StatelessWidget {
         bottom: compact ? 3 : 4,
       ),
       decoration: BoxDecoration(
-        color: _color.withValues(alpha: 0.1),
+        color: effectiveColor.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
@@ -57,14 +59,14 @@ class RiskBadge extends StatelessWidget {
         children: [
           Container(
             padding: EdgeInsets.all(compact ? 2.5 : 3),
-            decoration: BoxDecoration(color: _color, shape: BoxShape.circle),
-            child: Icon(_icon, size: compact ? 9 : 10, color: Colors.white),
+            decoration: BoxDecoration(color: effectiveColor, shape: BoxShape.circle),
+            child: Icon(effectiveIcon, size: compact ? 9 : 10, color: Colors.white),
           ),
           const SizedBox(width: 5),
           Text(
-            score != null ? '$riskLevel • $score%' : riskLevel,
+            effectiveLabel,
             style: TextStyle(
-              color: _color,
+              color: effectiveColor,
               fontSize: compact ? 11 : 12,
               fontWeight: FontWeight.w700,
             ),
@@ -443,7 +445,9 @@ class HealthRecordCard extends StatelessWidget {
                   expand: false,
                   icon: Icons.monitor_heart_rounded,
                   label: 'BP',
-                  value: record.bloodPressure,
+                  value: record.bloodPressure != '—'
+                      ? '${record.bloodPressure} mmHg'
+                      : '—',
                 ),
                 const SizedBox(width: 8),
                 _Metric(
@@ -451,7 +455,7 @@ class HealthRecordCard extends StatelessWidget {
                   icon: Icons.straighten_rounded,
                   label: 'BMI',
                   value: (record.bmi != null && record.bmi! > 0)
-                      ? record.bmi!.toStringAsFixed(1)
+                      ? '${record.bmi!.toStringAsFixed(2)} kg/m²'
                       : '—',
                 ),
                 const SizedBox(width: 8),
@@ -603,7 +607,7 @@ class TrendChip extends StatelessWidget {
 
   /// The patient's current risk level. When the trend is "Stable" but the
   /// patient is Highly At Risk, a plain "Stable" would read as "okay" —
-  /// so the chip shows "Still High Risk" in the high-risk color instead.
+  /// so the chip shows "Still Highly At Risk" in the high-risk color instead.
   final String? riskLevel;
 
   /// Optional: count of valid glucose readings (glucose != null && glucose > 0),
@@ -631,7 +635,7 @@ class TrendChip extends StatelessWidget {
   bool get _stillHighRisk =>
       trend == 'Stable' && riskLevel == AppConstants.riskHigh;
 
-  String get _label => _stillHighRisk ? 'Still High Risk' : trend;
+  String get _label => _stillHighRisk ? 'Still Highly At Risk' : trend;
 
   Color get _color {
     if (_stillHighRisk) return AppColors.highRisk;

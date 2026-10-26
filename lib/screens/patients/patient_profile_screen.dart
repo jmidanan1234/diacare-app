@@ -659,7 +659,7 @@ class _TrendsTab extends StatelessWidget {
     final bpRecords = reversed.where((r) => r.systolicBP != null && r.systolicBP! > 0).toList();
     final timelineRecords = records.where((r) => r.riskLevel.isNotEmpty && r.riskLevel != 'None').take(8).toList();
     // Newest-first glucose values for trend + the latest classified record for
-    // TrendChip's riskLevel context (needed for "Still High Risk" display).
+    // TrendChip's riskLevel context (needed for "Still Highly At Risk" display).
     final trend = RiskClassifier.getTrend(records.map((r) => r.bloodGlucose).toList());
     final latestClassified = records.where((r) => r.riskLevel.isNotEmpty).firstOrNull;
 
@@ -852,7 +852,9 @@ class _ChartCard extends StatelessWidget {
                     sideTitles: SideTitles(
                       showTitles: true,
                       reservedSize: 22,
+                      interval: 1.0,
                       getTitlesWidget: (v, _) {
+                        if (v != v.roundToDouble()) return const SizedBox();
                         final idx = v.toInt();
                         if (idx >= 0 && idx < labels.length) {
                           return Text(

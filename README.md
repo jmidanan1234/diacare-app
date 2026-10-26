@@ -23,9 +23,9 @@ A Flutter-based mobile application for Barangay Health Workers (BHW) to monitor 
 ### Risk Classification Logic
 | Risk Level | Triggers |
 |---|---|
-| **High Risk** | Glucose ≥ 200 mg/dL **OR** Systolic BP ≥ 140 mmHg **OR** BMI ≥ 35 **OR** Medication missed |
-| **Moderate Risk** | Glucose 140–199 **OR** Systolic BP 130–139 **OR** BMI 30–34.9 |
-| **Normal** | All values within normal range + medication taken |
+| **Highly At Risk** | Glucose > 250 mg/dL or < 54 mg/dL **OR** Systolic BP ≥ 140 mmHg or Diastolic BP ≥ 90 mmHg |
+| **At Risk** | Glucose 181–250 mg/dL or 54–69 mg/dL **OR** Systolic BP 120–139 mmHg or Diastolic BP 80–89 mmHg |
+| **Normal** | All values within normal target range (Glucose 70–180 mg/dL, BP < 120/80 mmHg) |
 
 ---
 
@@ -123,8 +123,7 @@ lib/
 - **No self-registration** — accounts are created by BHN/Admin only
 - **Role-based access** — BHW can only view patients in their assigned Purok
 - **Password hashing** — MD5 hashing (upgrade to bcrypt for production)
-- **Local-first** — all data stored on-device via SQLite (sqflite)
-- **Pending approval** — new patients added by BHW require Admin approval
+- **Local-first** — all data stored on-device via SQLite (sqflite) with automatic background cloud sync
 
 ---
 
@@ -166,7 +165,6 @@ DiaCare is designed for community health monitoring and decision-support only. I
 - [ ] Replace MD5 password hashing with `bcrypt`
 - [ ] Connect `SyncService` to real REST API endpoint
 - [ ] Set up remote backend (Firebase / Supabase / custom)
-- [ ] Enable BHN/Admin web panel for patient approvals
 - [ ] Add biometric authentication
 - [ ] Implement proper SSL certificate pinning
 - [ ] Add crash analytics (Firebase Crashlytics)

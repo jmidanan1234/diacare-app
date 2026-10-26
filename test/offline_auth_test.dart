@@ -83,5 +83,14 @@ void main() {
       );
       expect(risk, equals(AppConstants.riskNormal));
     });
+
+    test('Negative inputs return explicit error message', () {
+      expect(RiskClassifier.validateBloodGlucose('-120'), equals('Negative inputs are not accepted'));
+      expect(RiskClassifier.validateBloodGlucose('-5'), equals('Negative inputs are not accepted'));
+      expect(RiskClassifier.validateSystolicBP('-120'), equals('Negative inputs are not accepted'));
+      expect(RiskClassifier.validateDiastolicBP('-80'), equals('Negative inputs are not accepted'));
+      expect(RiskClassifier.validateHeight('-160'), equals('Negative inputs are not accepted'));
+      expect(RiskClassifier.validateWeight('-65'), equals('Negative inputs are not accepted'));
+    });
   });
 }

@@ -10,13 +10,13 @@ void main() {
       middleName: 'M',
       birthDate: DateTime(1965, 5, 12),
       sex: 'Male',
-      barangay: 'Balaogo',
+      barangay: 'Bacolod',
       purok: 'Purok 4',
       diabetesType: 'Type 2',
       medications: 'Metformin 500mg',
       assignedBhwId: 'bhw-1',
       status: 'Approved',
-      riskLevel: 'Moderate',
+      riskLevel: 'At Risk',
       createdAt: DateTime.now(),
       updatedAt: DateTime.now(),
     );
@@ -28,13 +28,13 @@ void main() {
       middleName: 'C',
       birthDate: DateTime(1978, 11, 23),
       sex: 'Female',
-      barangay: 'Balaogo',
+      barangay: 'Bacolod',
       purok: 'Purok Baybay',
       diabetesType: 'Type 1',
       medications: 'Insulin Glargine',
       assignedBhwId: 'bhw-1',
       status: 'Approved',
-      riskLevel: 'High',
+      riskLevel: 'Highly At Risk',
       createdAt: DateTime.now(),
       updatedAt: DateTime.now(),
     );
@@ -45,13 +45,13 @@ void main() {
       lastName: 'Dela Cruz',
       birthDate: DateTime(1955, 3, 10),
       sex: 'Male',
-      barangay: 'Balaogo',
+      barangay: 'Bacolod',
       purok: '3',
       diabetesType: 'Type 2',
       medications: null,
       assignedBhwId: 'bhw-1',
       status: 'Approved',
-      riskLevel: 'Low',
+      riskLevel: 'Normal',
       createdAt: DateTime.now(),
       updatedAt: DateTime.now(),
     );
@@ -64,7 +64,7 @@ void main() {
       expect(patient3.fullName, 'Juan Dela Cruz');
       expect(patient1.fullName.contains('Purok'), isFalse);
       expect(patient2.fullName.contains('Baybay'), isFalse);
-      expect(patient3.fullName.contains('Balaogo'), isFalse);
+      expect(patient3.fullName.contains('Bacolod'), isFalse);
     });
 
     test('Live search filtering by name works accurately and case-insensitively', () {

@@ -138,12 +138,12 @@ void main() {
     });
 
     testWidgets('TrendChip with 2 readings in a narrow row does not overflow', (tester) async {
-      await tester.pumpWidget(MaterialApp(
+      await tester.pumpWidget(const MaterialApp(
         home: Scaffold(
           body: SizedBox(
             width: 320,
             child: Row(
-              children: const [
+              children: [
                 Text('Overall Trend:'),
                 SizedBox(width: 8),
                 Expanded(

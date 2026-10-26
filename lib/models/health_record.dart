@@ -118,7 +118,7 @@ class HealthRecord {
       bloodGlucose: (bg == null || bg == 0.0) ? null : bg,
       systolicBP: (s == null || s == 0.0) ? null : s,
       diastolicBP: (d == null || d == 0.0) ? null : d,
-      bmi: (bmi == null || bmi == 0.0) ? null : bmi,
+      bmi: (bmi == null || bmi == 0.0) ? null : double.parse(bmi.toStringAsFixed(2)),
       height: (map['height'] as num?)?.toDouble(),
       weight: (map['weight'] as num?)?.toDouble(),
       temp: (map['temp'] as num?)?.toDouble(),

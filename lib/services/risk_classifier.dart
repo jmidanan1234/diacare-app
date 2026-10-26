@@ -61,10 +61,11 @@ class RiskClassifier {
     return AppConstants.riskNormal;
   }
 
-  /// Calculates BMI from height (cm) and weight (kg)
+  /// Calculates BMI from height (cm) and weight (kg), rounded to two decimal places
   static double calculateBmi(double heightCm, double weightKg) {
     final hMeters = heightCm / 100;
-    return weightKg / (hMeters * hMeters);
+    final bmi = weightKg / (hMeters * hMeters);
+    return double.parse(bmi.toStringAsFixed(2));
   }
 
   /// Normalized Glycemic Risk Severity Score (0–100%), banded exactly like
@@ -287,24 +288,33 @@ class RiskClassifier {
 
   static String? validateBloodGlucose(String? value) {
     if (value == null || value.trim().isEmpty) return 'Required';
-    final v = double.tryParse(value.trim());
+    final trimmed = value.trim();
+    if (trimmed.startsWith('-')) return 'Negative inputs are not accepted';
+    final v = double.tryParse(trimmed);
     if (v == null) return 'Enter a valid number';
+    if (v < 0) return 'Negative inputs are not accepted';
     if (v < 30 || v > 600) return 'Range: 30–600 mg/dL';
     return null;
   }
 
   static String? validateSystolicBP(String? value) {
     if (value == null || value.trim().isEmpty) return 'Required';
-    final v = double.tryParse(value.trim());
+    final trimmed = value.trim();
+    if (trimmed.startsWith('-')) return 'Negative inputs are not accepted';
+    final v = double.tryParse(trimmed);
     if (v == null) return 'Enter a valid number';
+    if (v < 0) return 'Negative inputs are not accepted';
     if (v < 60 || v > 250) return 'Range: 60–250';
     return null;
   }
 
   static String? validateDiastolicBP(String? value) {
     if (value == null || value.trim().isEmpty) return 'Required';
-    final v = double.tryParse(value.trim());
+    final trimmed = value.trim();
+    if (trimmed.startsWith('-')) return 'Negative inputs are not accepted';
+    final v = double.tryParse(trimmed);
     if (v == null) return 'Enter a valid number';
+    if (v < 0) return 'Negative inputs are not accepted';
     if (v < 40 || v > 150) return 'Range: 40–150';
     return null;
   }
@@ -312,8 +322,11 @@ class RiskClassifier {
   /// Height validator — BHW measures with tape measure during visit
   static String? validateHeight(String? value) {
     if (value == null || value.trim().isEmpty) return null;
-    final v = double.tryParse(value.trim());
+    final trimmed = value.trim();
+    if (trimmed.startsWith('-')) return 'Negative inputs are not accepted';
+    final v = double.tryParse(trimmed);
     if (v == null) return 'Enter a valid number';
+    if (v < 0) return 'Negative inputs are not accepted';
     if (v < 50 || v > 250) return 'Must be between 50–250 cm';
     return null;
   }
@@ -321,9 +334,12 @@ class RiskClassifier {
   /// Weight validator — BHW measures with weighing scale during visit
   static String? validateWeight(String? value) {
     if (value == null || value.trim().isEmpty) return null;
-    final v = double.tryParse(value.trim());
+    final trimmed = value.trim();
+    if (trimmed.startsWith('-')) return 'Negative inputs are not accepted';
+    final v = double.tryParse(trimmed);
     if (v == null) return 'Enter a valid number';
-    if (v < 10 || v > 300) return 'Must be between 10–300 kg';
+    if (v < 0) return 'Negative inputs are not accepted';
+    if (v < 20 || v > 300) return 'Must be between 20–300 kg';
     return null;
   }
 }
