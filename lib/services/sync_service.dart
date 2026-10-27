@@ -447,6 +447,7 @@ class SyncService {
 
       for (final doc in patientSnap.docs) {
         final data = doc.data();
+        if (data['isArchived'] == true) continue;
         final remoteUpdated = _asDate(data['updatedAt']) ?? DateTime.now();
         final local = await _db.getPatientById(doc.id);
 
@@ -503,6 +504,7 @@ class SyncService {
 
       for (final doc in recordSnap.docs) {
         final data = doc.data();
+        if (data['isArchived'] == true) continue;
         final remoteUpdated = _asDate(data['updatedAt']) ?? DateTime.now();
         final local = await _db.getRecordById(doc.id);
 
