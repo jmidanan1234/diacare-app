@@ -292,6 +292,9 @@ class SyncService {
             'observations': r.observations,
             'riskLevel': r.riskLevel,
             'source': 'app',
+            'isArchived': true,
+            'archivedAt': FieldValue.serverTimestamp(),
+            'archiveReason': 'Accomplished visit reading',
             'visitDate': Timestamp.fromDate(r.visitDate),
             'createdAt': Timestamp.fromDate(r.createdAt),
             'updatedAt': Timestamp.fromDate(r.updatedAt),
@@ -504,7 +507,6 @@ class SyncService {
 
       for (final doc in recordSnap.docs) {
         final data = doc.data();
-        if (data['isArchived'] == true) continue;
         final remoteUpdated = _asDate(data['updatedAt']) ?? DateTime.now();
         final local = await _db.getRecordById(doc.id);
 
