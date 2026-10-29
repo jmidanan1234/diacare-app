@@ -419,7 +419,7 @@ class HealthRecordCard extends StatelessWidget {
                     Icon(Icons.cloud_off_rounded, size: 12, color: AppColors.warning),
                     SizedBox(width: 4),
                     Text(
-                      'Not synced yet',
+                      'Not synced',
                       style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.warning),
                     ),
                   ],
@@ -430,49 +430,56 @@ class HealthRecordCard extends StatelessWidget {
             const Divider(height: 1),
             const SizedBox(height: 12),
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                _Metric(
-                  expand: false,
-                  icon: Icons.water_drop_rounded,
-                  label: 'Glucose',
-                  value: (record.bloodGlucose != null && record.bloodGlucose! > 0)
-                      ? '${record.bloodGlucose!.toStringAsFixed(0)} mg/dL'
-                      : '—',
+                Expanded(
+                  child: _Metric(
+                    expand: true,
+                    icon: Icons.water_drop_rounded,
+                    label: 'Glucose',
+                    value: (record.bloodGlucose != null && record.bloodGlucose! > 0)
+                        ? '${record.bloodGlucose!.toStringAsFixed(0)} mg/dL'
+                        : '—',
+                  ),
                 ),
-                const SizedBox(width: 8),
-                _Metric(
-                  expand: false,
-                  icon: Icons.monitor_heart_rounded,
-                  label: 'BP',
-                  value: record.bloodPressure != '—'
-                      ? '${record.bloodPressure} mmHg'
-                      : '—',
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _Metric(
+                    expand: true,
+                    icon: Icons.monitor_heart_rounded,
+                    label: 'BP',
+                    value: record.bloodPressure != '—'
+                        ? '${record.bloodPressure} mmHg'
+                        : '—',
+                  ),
                 ),
-                const SizedBox(width: 8),
-                _Metric(
-                  expand: false,
-                  icon: Icons.straighten_rounded,
-                  label: 'BMI',
-                  value: (record.bmi != null && record.bmi! > 0)
-                      ? '${record.bmi!.toStringAsFixed(2)} kg/m²'
-                      : '—',
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _Metric(
+                    expand: true,
+                    icon: Icons.straighten_rounded,
+                    label: 'BMI',
+                    value: (record.bmi != null && record.bmi! > 0)
+                        ? '${record.bmi!.toStringAsFixed(2)} kg/m²'
+                        : '—',
+                  ),
                 ),
-                const SizedBox(width: 8),
-                _Metric(
-                  expand: false,
-                  icon: Icons.medication_rounded,
-                  label: 'Medication',
-                  value: record.medAdherence == AppConstants.medTaken
-                      ? 'Taken'
-                      : record.medAdherence == AppConstants.medPartial
-                          ? 'Partial'
-                          : 'Missed',
-                  valueColor: record.medAdherence == AppConstants.medTaken
-                      ? AppColors.success
-                      : record.medAdherence == AppConstants.medPartial
-                          ? AppColors.warning
-                          : AppColors.error,
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _Metric(
+                    expand: true,
+                    icon: Icons.medication_rounded,
+                    label: 'Medication',
+                    value: record.medAdherence == AppConstants.medTaken
+                        ? 'Taken'
+                        : record.medAdherence == AppConstants.medPartial
+                            ? 'Partial'
+                            : 'Missed',
+                    valueColor: record.medAdherence == AppConstants.medTaken
+                        ? AppColors.success
+                        : record.medAdherence == AppConstants.medPartial
+                            ? AppColors.warning
+                            : AppColors.error,
+                  ),
                 ),
               ],
             ),
@@ -568,11 +575,14 @@ class _Metric extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final labelText = Text(
-      label,
-      style: const TextStyle(fontSize: 10, color: AppColors.textSecondary),
-      overflow: TextOverflow.ellipsis,
-      maxLines: 1,
+    final labelText = FittedBox(
+      fit: BoxFit.scaleDown,
+      alignment: Alignment.centerLeft,
+      child: Text(
+        label,
+        style: const TextStyle(fontSize: 10, color: AppColors.textSecondary),
+        maxLines: 1,
+      ),
     );
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,

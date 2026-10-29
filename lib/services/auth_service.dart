@@ -118,6 +118,9 @@ class AuthService {
               final salt = generateSalt();
               final hash = _hashPassword(password, salt);
 
+              final existingLocalUser = await _db.getUserById(uid) ??
+                  await _db.getUserByUsername(normalizedUsername);
+
               cachedUser = UserModel(
                 id: uid,
                 firstName: first,
@@ -133,7 +136,7 @@ class AuthService {
                 createdAt: (data['createdAt'] is Timestamp)
                     ? (data['createdAt'] as Timestamp).toDate()
                     : DateTime.now(),
-                photoPath: null,
+                photoPath: existingLocalUser?.photoPath,
               );
               await _db.upsertUser(cachedUser);
             }

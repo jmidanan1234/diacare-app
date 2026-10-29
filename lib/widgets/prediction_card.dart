@@ -216,34 +216,6 @@ class PredictionCard extends StatelessWidget {
             ),
           ),
         ],
-        if (warn) ...[
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: AppColors.error.withValues(alpha: 0.08),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: const Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.warning_rounded, size: 14, color: AppColors.error),
-                SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    'The estimated glucose is in the Highly At Risk range. '
-                    'Prioritize a follow-up visit.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.error,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
         const SizedBox(height: 10),
         Text(
           'Based on the last ${r.basedOn} readings to estimate glucose 7 days '

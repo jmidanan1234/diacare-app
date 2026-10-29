@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:intl/intl.dart';
 import '../../providers/app_provider.dart';
 import '../../models/patient.dart';
 import '../../models/health_record.dart';
@@ -8,6 +9,8 @@ import '../../services/risk_classifier.dart';
 import '../../utils/theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/shared_widgets.dart';
+
+const bool kDemoDatePicker = true;
 
 
 enum MedAdherence { taken, partial, missed }
@@ -65,6 +68,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   final _weightFocus = FocusNode();
 
   Patient? _selectedPatient;
+  DateTime _visitDate = DateTime.now();
   MedAdherence _medAdherence = MedAdherence.taken;
   bool _insulinUse = false;
   bool _isLoading = false;
@@ -370,6 +374,15 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
           observations: observations,
         );
       } else {
+        final now = DateTime.now();
+        final combinedDate = DateTime(
+          _visitDate.year,
+          _visitDate.month,
+          _visitDate.day,
+          now.hour,
+          now.minute,
+          now.second,
+        );
         riskLevel = await provider.addHealthRecord(
           patientId: patient.id,
           bloodGlucose: glucose,
@@ -383,6 +396,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
           medicationName: medName,
           dosage: dosage,
           observations: observations,
+          visitDate: combinedDate,
         );
       }
     } catch (e) {
@@ -550,6 +564,56 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
               ),
               const SizedBox(height: 16),
 
+              // ── Visit Date ───────────────────────────────────────────
+              if (!_isEdit) ...[
+                _SectionCard(
+                  title: 'Visit Date',
+                  hint: 'Tap to change the visit date',
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: () async {
+                      final picked = await showDatePicker(
+                        context: context,
+                        initialDate: _visitDate,
+                        firstDate: DateTime(2000),
+                        lastDate: DateTime.now(),
+                      );
+                      if (picked != null) {
+                        setState(() => _visitDate = picked);
+                      }
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: AppColors.divider),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.calendar_today_rounded,
+                              size: 18, color: AppColors.primary),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              DateFormat('MMM d, y').format(_visitDate),
+                              style: const TextStyle(
+                                fontSize: 14.5,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.textPrimary,
+                              ),
+                            ),
+                          ),
+                          const Icon(Icons.arrow_drop_down,
+                              color: AppColors.textSecondary),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
+
               // ── Blood Glucose ────────────────────────────────────────
               _SectionCard(
                 title: 'Blood Glucose',
@@ -699,7 +763,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
               // ── Medication Adherence ──────────────────────────────────
               _SectionCard(
                 title: 'Medication Adherence',
-                hint: 'Was the patient\'s scheduled medication taken for today?',
+                hint: 'How well has the patient been following their medication schedule?',
                 child: Column(
                   children: [
                     _MedOption(
@@ -724,7 +788,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                     const SizedBox(height: 8),
                     _MedOption(
                       label: 'Missed / Not Taken',
-                      description: 'No scheduled medication taken today',
+                      description: 'Most or all scheduled doses missed.',
                       icon: Icons.cancel_rounded,
                       color: AppColors.error,
                       isSelected: _medAdherence == MedAdherence.missed,

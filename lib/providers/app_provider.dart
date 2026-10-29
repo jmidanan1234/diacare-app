@@ -238,17 +238,29 @@ class AppProvider extends ChangeNotifier {
     double? bloodGlucose,
     DateTime at,
   ) async {
-    // The patient may not be in the filtered list (e.g. marked Inactive),
-    // so fall back to a generic name rather than throwing.
     final match = _patients.where((p) => p.id == patientId);
     final name = match.isEmpty ? 'Patient' : match.first.fullName;
 
-    String reasonText = 'very serious readings';
-    if (bloodGlucose != null && bloodGlucose > 0) {
-      if (bloodGlucose < AppConstants.glucoseSevereLow) {
-        reasonText = 'very low blood sugar (${bloodGlucose.toInt()} mg/dL)';
-      } else if (bloodGlucose > AppConstants.glucoseSevereHigh) {
-        reasonText = 'very high blood sugar (${bloodGlucose.toInt()} mg/dL)';
+    const disclaimer = '\n\nFor monitoring support only; not a diagnosis or treatment recommendation.';
+    String message;
+
+    final y = bloodGlucose?.round();
+
+    if (bloodGlucose != null && bloodGlucose < AppConstants.glucoseSevereLow) {
+      // Hypoglycemia: no projection
+      message = 'Latest reading: $y mg/dL (Highly At Risk). Inform the BHN today.$disclaimer';
+    } else {
+      // Hyperglycemia (or fallback)
+      final patientRecords = await _db.getRecordsByPatient(patientId);
+      final prediction = RiskClassifier.predictGlucose(patientRecords);
+
+      if (prediction != null) {
+        final x = prediction.value.round();
+        message =
+            'Projected glucose in 7 days: $x mg/dL (Highly At Risk). Latest reading: $y mg/dL. Inform the BHN today.$disclaimer';
+      } else {
+        message =
+            'Latest reading: ${y ?? '—'} mg/dL (Highly At Risk). Not enough readings for a projection. Inform the BHN today.$disclaimer';
       }
     }
 
@@ -257,7 +269,7 @@ class AppProvider extends ChangeNotifier {
       patientId: patientId,
       patientName: name,
       type: 'high_risk',
-      message: '$name has $reasonText. Immediate follow-up recommended.',
+      message: message,
       isRead: false,
       createdAt: at,
     );
@@ -287,13 +299,16 @@ class AppProvider extends ChangeNotifier {
                 ? '${diastolicBP.toInt()}'
                 : '';
 
+    const disclaimer = '\n\nFor monitoring support only; not a diagnosis or treatment recommendation.';
+    final message =
+        'Blood pressure reading: $bpText mmHg (Highly At Risk). Inform the BHN today.$disclaimer';
+
     final notif = NotificationModel(
       id: _uuid.v4(),
       patientId: patientId,
       patientName: name,
       type: 'high_bp',
-      message:
-          '$name has high blood pressure ($bpText mmHg). Immediate follow-up recommended.',
+      message: message,
       isRead: false,
       createdAt: at,
     );
@@ -319,6 +334,7 @@ class AppProvider extends ChangeNotifier {
     String? medicationName,
     String? dosage,
     String? observations,
+    DateTime? visitDate,
   }) async {
     final riskLevel = RiskClassifier.classify(
           bloodGlucose: bloodGlucose,
@@ -328,6 +344,7 @@ class AppProvider extends ChangeNotifier {
         '';
 
     final now = DateTime.now();
+    final actualVisitDate = visitDate ?? now;
     final record = HealthRecord(
       id: _uuid.v4(),
       patientId: patientId,
@@ -346,7 +363,7 @@ class AppProvider extends ChangeNotifier {
       dosage: dosage,
       observations: observations,
       riskLevel: riskLevel,
-      visitDate: now,
+      visitDate: actualVisitDate,
       createdAt: now,
       updatedAt: now,
     );

@@ -218,18 +218,8 @@ class _RecordListItem extends StatelessWidget {
     required this.onTap,
   });
 
-  Color _getRiskColor(String riskLevel) {
-    if (riskLevel == AppConstants.riskHigh) return AppColors.highRisk;
-    if (riskLevel == AppConstants.riskModerate) return AppColors.moderateRisk;
-    if (riskLevel == AppConstants.riskNormal) return AppColors.normalRisk;
-    return AppColors.primary;
-  }
-
   @override
   Widget build(BuildContext context) {
-    final riskColor = _getRiskColor(record.riskLevel);
-    final riskScore = RiskClassifier.calculateRiskScore(record.bloodGlucose);
-
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
@@ -246,26 +236,6 @@ class _RecordListItem extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             child: Row(
               children: [
-                // Patient initial circle badge
-                Container(
-                  width: 42,
-                  height: 42,
-                  decoration: BoxDecoration(
-                    color: riskColor.withValues(alpha: 0.12),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Center(
-                    child: Text(
-                      patientName.trim().isNotEmpty ? patientName.trim()[0].toUpperCase() : 'P',
-                      style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w800,
-                        color: riskColor,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
                 // Name and visit timestamp
                 Expanded(
                   child: Column(
@@ -325,13 +295,6 @@ class _RecordListItem extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                // Risk Badge & Tap Chevron
-                RiskBadge(
-                  riskLevel: record.riskLevel,
-                  compact: true,
-                  score: riskScore,
-                ),
-                const SizedBox(width: 4),
                 const Icon(
                   Icons.chevron_right_rounded,
                   size: 20,
@@ -454,7 +417,7 @@ class _RecordDetailSheet extends StatelessWidget {
                               Icon(Icons.cloud_off_rounded, size: 12, color: AppColors.warning),
                               SizedBox(width: 4),
                               Text(
-                                'Pending sync',
+                                'Not synced',
                                 style: TextStyle(
                                   fontSize: 11,
                                   fontWeight: FontWeight.w700,
@@ -474,7 +437,7 @@ class _RecordDetailSheet extends StatelessWidget {
 
                   // Section Title
                   const Text(
-                    'Clinical Measurements',
+                    'Patient Health Data',
                     style: TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.w700,
@@ -675,14 +638,14 @@ class _RecordDetailSheet extends StatelessWidget {
                         color: AppColors.accentSoft,
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: Row(
+                      child: const Row(
                         children: [
-                          const Icon(Icons.local_hospital_rounded, size: 16, color: AppColors.accent),
-                          const SizedBox(width: 8),
+                          Icon(Icons.local_hospital_rounded, size: 16, color: AppColors.accent),
+                          SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              'Referred to RHU: ${record.referral}',
-                              style: const TextStyle(
+                              'Referred to RHU',
+                              style: TextStyle(
                                 fontSize: 12.5,
                                 fontWeight: FontWeight.w600,
                                 color: AppColors.accent,

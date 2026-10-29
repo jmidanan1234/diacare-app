@@ -656,7 +656,6 @@ class _TrendsTab extends StatelessWidget {
     final reversed = records.reversed.toList();
     final glucoseRecords = reversed.where((r) => r.bloodGlucose != null && r.bloodGlucose! > 0).toList();
     final glucosePrediction = RiskClassifier.predictGlucose(records);
-    final bpRecords = reversed.where((r) => r.systolicBP != null && r.systolicBP! > 0).toList();
     final timelineRecords = records.where((r) => r.riskLevel.isNotEmpty && r.riskLevel != 'None').take(8).toList();
     // Newest-first glucose values for trend + the latest classified record for
     // TrendChip's riskLevel context (needed for "Still Highly At Risk" display).
@@ -731,21 +730,6 @@ class _TrendsTab extends StatelessWidget {
                     fitPercent: glucosePrediction.fitPercent,
                   )
                 : null,
-          ),
-          const SizedBox(height: 12),
-        ],
-
-        if (bpRecords.isNotEmpty) ...[
-          _ChartCard(
-            title: 'Systolic BP (mmHg)',
-            spots: bpRecords
-                .asMap()
-                .entries
-                .map((e) => FlSpot(e.key.toDouble(), e.value.systolicBP!))
-                .toList(),
-            color: AppColors.highRisk,
-            labels: bpRecords.map((r) => DateFormat('M/d').format(r.visitDate)).toList(),
-            dangerLine: AppConstants.systolicHighRisk,
           ),
           const SizedBox(height: 12),
         ],
@@ -825,9 +809,27 @@ class _ChartCard extends StatelessWidget {
           Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
           const SizedBox(height: 16),
           SizedBox(
-            height: 140,
+            height: 180,
             child: LineChart(
               LineChartData(
+                lineTouchData: LineTouchData(
+                  touchTooltipData: LineTouchTooltipData(
+                    getTooltipColor: (_) => AppColors.textPrimary,
+                    tooltipRoundedRadius: 8,
+                    getTooltipItems: (touchedSpots) {
+                      return touchedSpots.map((spot) {
+                        return LineTooltipItem(
+                          '${spot.y.round()} mg/dL',
+                          const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        );
+                      }).toList();
+                    },
+                  ),
+                ),
                 gridData: FlGridData(
                   show: true,
                   drawVerticalLine: false,
@@ -842,6 +844,7 @@ class _ChartCard extends StatelessWidget {
                     sideTitles: SideTitles(
                       showTitles: true,
                       reservedSize: 40,
+                      interval: 50,
                       getTitlesWidget: (v, _) => Text(
                         v.toInt().toString(),
                         style: const TextStyle(fontSize: 10, color: AppColors.textSecondary),
@@ -891,6 +894,7 @@ class _ChartCard extends StatelessWidget {
                   LineChartBarData(
                     spots: spots,
                     isCurved: true,
+                    curveSmoothness: 0.35,
                     color: color,
                     barWidth: 2.5,
                     dotData: FlDotData(
@@ -903,7 +907,14 @@ class _ChartCard extends StatelessWidget {
                     ),
                     belowBarData: BarAreaData(
                       show: true,
-                      color: color.withValues(alpha: 0.08),
+                      gradient: LinearGradient(
+                        colors: [
+                          color.withValues(alpha: 0.25),
+                          color.withValues(alpha: 0.02),
+                        ],
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                      ),
                     ),
                   ),
                 ],
