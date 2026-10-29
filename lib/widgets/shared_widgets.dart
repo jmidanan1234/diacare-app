@@ -135,43 +135,55 @@ class SummaryCard extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(7),
-                      decoration: BoxDecoration(
-                        color: color.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Icon(icon, color: color, size: 18),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Align(
-                        alignment: Alignment.centerRight,
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Text(
-                            value,
-                            style: TextStyle(
-                              fontSize: 29,
-                              fontWeight: FontWeight.w800,
-                              color: color,
-                              height: 1.1,
-                              letterSpacing: -0.5,
+                ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 32),
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      SizedBox(
+                        width: double.infinity,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 36),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              value,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 29,
+                                fontWeight: FontWeight.w800,
+                                color: color,
+                                height: 1.1,
+                                letterSpacing: -0.5,
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
-                  ],
+                      Positioned(
+                        left: 0,
+                        top: 0,
+                        bottom: 0,
+                        child: Center(
+                          child: Container(
+                            padding: const EdgeInsets.all(7),
+                            decoration: BoxDecoration(
+                              color: color.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Icon(icon, color: color, size: 18),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
                 const SizedBox(height: 8),
                 SizedBox(
                   width: double.infinity,
                   child: Text(
                     title,
-                    textAlign: TextAlign.left,
+                    textAlign: TextAlign.center,
                     style: const TextStyle(
                       fontSize: 13,
                       color: AppColors.textSecondary,

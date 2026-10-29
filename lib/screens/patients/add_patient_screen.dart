@@ -7,6 +7,7 @@ import '../../models/patient.dart';
 import '../../utils/theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/shared_widgets.dart';
+import '../../widgets/compact_dropdown_field.dart';
 
 class AddPatientScreen extends StatefulWidget {
   /// When provided, the screen edits this patient instead of adding a new one.
@@ -456,12 +457,10 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
               ),
 
               // Sex
-              _field(DropdownButtonFormField<String>(
-                initialValue: _sex,
-                decoration: const InputDecoration(labelText: 'Sex *'),
-                items: AppConstants.sexOptions
-                    .map((s) => DropdownMenuItem(value: s, child: Text(s)))
-                    .toList(),
+              _field(CompactDropdownField(
+                value: _sex,
+                label: 'Sex *',
+                options: AppConstants.sexOptions,
                 onChanged: (v) => setState(() => _sex = v!),
               )),
 
@@ -469,13 +468,10 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
               // specific enough to find the house, consistent enough to
               // filter and report on.
               _field(
-                DropdownButtonFormField<String>(
-                  initialValue: _barangay,
-                  isExpanded: true,
-                  decoration: const InputDecoration(labelText: 'Barangay *'),
-                  items: AppConstants.barangays
-                      .map((b) => DropdownMenuItem(value: b, child: Text(b)))
-                      .toList(),
+                CompactDropdownField(
+                  value: _barangay,
+                  label: 'Barangay *',
+                  options: AppConstants.barangays,
                   onChanged: (v) => setState(() => _barangay = v),
                   validator: (v) => v == null || v.isEmpty ? 'Required' : null,
                 ),
@@ -504,12 +500,10 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
               )),
 
               _sectionHeader('Medical Information'),
-              _field(DropdownButtonFormField<String>(
-                initialValue: _diabetesType,
-                decoration: const InputDecoration(labelText: 'Diabetes Type *'),
-                items: AppConstants.diabetesTypes
-                    .map((t) => DropdownMenuItem(value: t, child: Text(t)))
-                    .toList(),
+              _field(CompactDropdownField(
+                value: _diabetesType,
+                label: 'Diabetes Type *',
+                options: AppConstants.diabetesTypes,
                 onChanged: (v) => setState(() => _diabetesType = v!),
               )),
 
