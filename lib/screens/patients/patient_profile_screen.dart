@@ -45,7 +45,12 @@ class _PatientProfileScreenState extends State<PatientProfileScreen>
 
   Future<void> _loadRecords() async {
     final provider = context.read<AppProvider>();
-    final records = await provider.getPatientRecords(widget.patient.id);
+    List<HealthRecord> records;
+    try {
+      records = await provider.getPatientRecords(widget.patient.id);
+    } on StateError {
+      records = [];
+    }
     if (!mounted) return;
     setState(() {
       _records = records;
@@ -115,6 +120,9 @@ class _PatientProfileScreenState extends State<PatientProfileScreen>
   @override
   Widget build(BuildContext context) {
     final p = _patient;
+    if (!context.watch<AppProvider>().patients.any((patient) => patient.id == p.id)) {
+      return const PatientAccessNotice();
+    }
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -456,7 +464,8 @@ class _RecordsTab extends StatelessWidget {
       itemCount: records.length,
       itemBuilder: (_, i) => HealthRecordCard(
         record: records[i],
-        onEdit: () => onEdit(records[i]),
+        onEdit: records[i].bhwId == context.read<AppProvider>().currentUser?.id
+            ? () => onEdit(records[i]) : null,
       ),
     );
   }
@@ -706,6 +715,7 @@ class _TrendsTab extends StatelessWidget {
                 .toList(),
             color: AppColors.primary,
             labels: glucoseRecords.map((r) => DateFormat('M/d').format(r.visitDate)).toList(),
+            visitDates: glucoseRecords.map((r) => r.visitDate).toList(),
             dangerLine: AppConstants.glucoseSevereHigh,
             lowDangerLine: AppConstants.glucoseSevereLow,
           ),
@@ -782,6 +792,7 @@ class _ChartCard extends StatelessWidget {
   final List<FlSpot> spots;
   final Color color;
   final List<String> labels;
+  final List<DateTime> visitDates;
   final double dangerLine;
   final double? lowDangerLine;
 
@@ -790,6 +801,7 @@ class _ChartCard extends StatelessWidget {
     required this.spots,
     required this.color,
     required this.labels,
+    required this.visitDates,
     required this.dangerLine,
     this.lowDangerLine,
   });
@@ -807,24 +819,65 @@ class _ChartCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          const Text(
+            'Touch or hover over the graph to view each reading.',
+            style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+          ),
           const SizedBox(height: 16),
           SizedBox(
             height: 180,
             child: LineChart(
               LineChartData(
                 lineTouchData: LineTouchData(
+                  enabled: true,
+                  handleBuiltInTouches: true,
+                  // Select the nearest reading across the plot, including
+                  // between widely spaced visits, rather than only within 10px.
+                  touchSpotThreshold: double.infinity,
+                  mouseCursorResolver: (_, response) =>
+                      response?.lineBarSpots?.isNotEmpty == true
+                          ? SystemMouseCursors.precise
+                          : SystemMouseCursors.basic,
+                  getTouchedSpotIndicator: (bar, indices) => indices.map((_) {
+                    return TouchedSpotIndicatorData(
+                      FlLine(color: color.withValues(alpha: 0.6), strokeWidth: 1.5, dashArray: [4, 3]),
+                      FlDotData(
+                        getDotPainter: (_, __, ___, ____) => FlDotCirclePainter(
+                          radius: 6,
+                          color: color,
+                          strokeColor: Colors.white,
+                          strokeWidth: 3,
+                        ),
+                      ),
+                    );
+                  }).toList(),
                   touchTooltipData: LineTouchTooltipData(
                     getTooltipColor: (_) => AppColors.textPrimary,
                     tooltipRoundedRadius: 8,
+                    fitInsideHorizontally: true,
+                    fitInsideVertically: true,
+                    maxContentWidth: 220,
                     getTooltipItems: (touchedSpots) {
                       return touchedSpots.map((spot) {
+                        final value = spot.y == spot.y.roundToDouble()
+                            ? spot.y.toInt().toString()
+                            : spot.y.toString();
+                        final date = DateFormat('MMM d, y • h:mm a')
+                            .format(visitDates[spot.spotIndex]);
                         return LineTooltipItem(
-                          '${spot.y.round()} mg/dL',
+                          '$value mg/dL',
                           const TextStyle(
                             color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
                           ),
+                          children: [
+                            TextSpan(
+                              text: '\n$date',
+                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w400, color: Color(0xFFCBD5E1)),
+                            ),
+                          ],
                         );
                       }).toList();
                     },

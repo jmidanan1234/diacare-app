@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import '../database/database_helper.dart';
@@ -11,8 +12,72 @@ import '../services/risk_classifier.dart';
 import '../services/sync_service.dart';
 import '../services/local_notification_service.dart';
 import '../utils/constants.dart';
+import '../utils/alert_schedule.dart';
 
-class AppProvider extends ChangeNotifier {
+class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
+  AppProvider() {
+    _auth.addListener(_onAuthChanged);
+    WidgetsBinding.instance.addObserver(this);
+    _scheduleAlertRollover();
+  }
+
+  Timer? _alertRolloverTimer;
+
+  void _scheduleAlertRollover() {
+    _alertRolloverTimer?.cancel();
+    final now = DateTime.now();
+    _alertRolloverTimer = Timer(nextAlertMidnight(now).difference(now), () {
+      notifyListeners();
+      unawaited(_clearExpiredTrayAlerts());
+      _scheduleAlertRollover();
+    });
+  }
+
+  Future<void> _clearExpiredTrayAlerts() async {
+    final now = DateTime.now();
+    for (final notification
+        in _notifications.where((n) => !n.isVisibleAt(now))) {
+      await _localNotif.cancelAlert(notification.id);
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _scheduleAlertRollover();
+      notifyListeners();
+      unawaited(_clearExpiredTrayAlerts());
+    }
+  }
+
+  String? _loadedBhwId;
+  int _loadVersion = 0;
+
+  void _onAuthChanged() {
+    if (_loadedBhwId == currentUser?.id) return;
+    _loadVersion++;
+    _loadedBhwId = currentUser?.id;
+    _patients = [];
+    _allRecords = [];
+    _notifications = [];
+    _syncLogs = [];
+    _totalRecordCount = 0;
+    _unsyncedCount = 0;
+    _lastSyncTime = null;
+    _selectedTab = 0;
+    _pendingPatientListFilter = null;
+    _isLoading = false;
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _alertRolloverTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _auth.removeListener(_onAuthChanged);
+    super.dispose();
+  }
+
   final _db = DatabaseHelper();
   final _auth = AuthService();
   final _sync = SyncService();
@@ -70,7 +135,11 @@ class AppProvider extends ChangeNotifier {
   }
 
   int get totalRecordCount => _totalRecordCount;
-  List<NotificationModel> get notifications => _notifications;
+  List<NotificationModel> get notifications {
+    final now = DateTime.now();
+    return _notifications.where((n) => n.isVisibleAt(now)).toList();
+  }
+
   String? get lastSyncTime => _lastSyncTime;
   bool get isLoading => _isLoading;
   int get selectedTab => _selectedTab;
@@ -79,7 +148,8 @@ class AppProvider extends ChangeNotifier {
   int get totalPatients => _patients.length;
   int get highRiskCount =>
       _patients.where((p) => p.riskLevel == AppConstants.riskHigh).length;
-  int get unreadNotifCount => _notifications.where((n) => !n.isRead).length;
+  int get unreadNotifCount =>
+      _notifications.where((n) => !n.isRead && !n.resolved).length;
 
   /// Latest visit date per patient, computed in a single pass over
   /// [_allRecords] (instead of re-filtering the full list for every patient).
@@ -107,37 +177,49 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<void> loadAll() async {
+    _onAuthChanged();
+    final bhwId = currentUser?.id;
+    if (bhwId == null) return;
+    final version = ++_loadVersion;
     _isLoading = true;
     notifyListeners();
 
-    final bhwId = currentUser!.id;
     final allPatients = await _db.getAllPatientsByBhw(bhwId);
     /* No approval step: every patient this worker has registered counts,
        whether or not the handset has synced them yet. 'Inactive' is the
        one status still held back — that is a patient the RHU turned
        away, and re-listing them would invite a duplicate registration. */
-    _patients = allPatients.where((p) => p.status != 'Inactive').toList();
-    _allRecords = await _db.getAllRecordsByBhw(bhwId);
+    final patients = allPatients.where((p) => p.status != 'Inactive').toList();
+    final allRecords = await _db.getAllRecordsByBhw(bhwId);
 
     // Risk is glucose-only, so only a glucose reading counts as an
     // assessment. A patient with no glucose reading on any visit (even if
     // they have BP, weight, etc.) must not carry a risk label.
-    final assessedPatientIds = _allRecords
+    final assessedPatientIds = allRecords
         .where((r) => r.bloodGlucose != null && r.bloodGlucose! > 0)
         .map((r) => r.patientId)
         .toSet();
-    for (int i = 0; i < _patients.length; i++) {
-      if (!assessedPatientIds.contains(_patients[i].id) &&
-          _patients[i].riskLevel.isNotEmpty) {
-        _patients[i] = _patients[i].copyWith(riskLevel: '');
-        await _db.updatePatientRisk(_patients[i].id, '');
+    for (int i = 0; i < patients.length; i++) {
+      if (!assessedPatientIds.contains(patients[i].id) &&
+          patients[i].riskLevel.isNotEmpty) {
+        patients[i] = patients[i].copyWith(riskLevel: '');
+        await _db.updatePatientRisk(patients[i].id, '');
       }
     }
-    _totalRecordCount = await _db.getTotalRecordCountByBhw(bhwId);
-    _unsyncedCount = await _db.getUnsyncedCount(bhwId);
-    _notifications = await _db.getNotificationsByBhw(bhwId);
-    _lastSyncTime = await _sync.getLastSyncTime();
-    _syncLogs = await _sync.getSyncLogs(bhwId);
+    final totalRecordCount = await _db.getTotalRecordCountByBhw(bhwId);
+    final unsyncedCount = await _db.getUnsyncedCount(bhwId);
+    final notifications = await _db.getNotificationsByBhw(bhwId);
+    final lastSyncTime = await _sync.getLastSyncTime();
+    final syncLogs = await _sync.getSyncLogs(bhwId);
+    if (currentUser?.id != bhwId || version != _loadVersion) return;
+    _patients = patients;
+    _allRecords = allRecords;
+    _totalRecordCount = totalRecordCount;
+    _unsyncedCount = unsyncedCount;
+    _notifications = notifications;
+    unawaited(_clearExpiredTrayAlerts());
+    _lastSyncTime = lastSyncTime;
+    _syncLogs = syncLogs;
 
     _isLoading = false;
     notifyListeners();
@@ -175,6 +257,7 @@ class AppProvider extends ChangeNotifier {
       final last = _lastVisitByPatient();
 
       for (final patient in _patients) {
+        if (currentUser?.id != bhwId) return;
         final lastVisit = last[patient.id];
         final referenceDate = lastVisit ?? patient.createdAt;
         final isOverdue = referenceDate.isBefore(cutoff);
@@ -206,7 +289,7 @@ class AppProvider extends ChangeNotifier {
         );
         await _db.insertNotification(notif);
         await _localNotif.showNoVisitAlert(
-            patientName: patient.fullName, message: message);
+            patientName: patient.fullName, message: message, alertId: notif.id);
         createdAny = true;
       }
 
@@ -220,7 +303,17 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<List<HealthRecord>> getPatientRecords(String patientId) async {
+    await _requireAssignedPatient(patientId);
     return await _db.getRecordsByPatient(patientId);
+  }
+
+  Future<void> _requireAssignedPatient(String patientId) async {
+    final patient = await _db.getPatientById(patientId);
+    if (currentUser == null ||
+        patient?.assignedBhwId != currentUser!.id ||
+        patient?.status == 'Inactive') {
+      throw StateError('This patient is not assigned to your account.');
+    }
   }
 
   /// Creates the Highly At Risk notification + local alert for a patient.
@@ -241,14 +334,16 @@ class AppProvider extends ChangeNotifier {
     final match = _patients.where((p) => p.id == patientId);
     final name = match.isEmpty ? 'Patient' : match.first.fullName;
 
-    const disclaimer = '\n\nFor monitoring support only; not a diagnosis or treatment recommendation.';
+    const disclaimer =
+        '\n\nFor monitoring support only; not a diagnosis or treatment recommendation.';
     String message;
 
     final y = bloodGlucose?.round();
 
     if (bloodGlucose != null && bloodGlucose < AppConstants.glucoseSevereLow) {
       // Hypoglycemia: no projection
-      message = 'Latest reading: $y mg/dL (Highly At Risk). Inform the BHN today.$disclaimer';
+      message =
+          'Latest reading: $y mg/dL (Highly At Risk). Inform the BHN today.$disclaimer';
     } else {
       // Hyperglycemia (or fallback)
       final patientRecords = await _db.getRecordsByPatient(patientId);
@@ -277,6 +372,7 @@ class AppProvider extends ChangeNotifier {
     await _localNotif.showHighRiskAlert(
       patientName: name,
       message: notif.message,
+      alertId: notif.id,
     );
   }
 
@@ -299,7 +395,8 @@ class AppProvider extends ChangeNotifier {
                 ? '${diastolicBP.toInt()}'
                 : '';
 
-    const disclaimer = '\n\nFor monitoring support only; not a diagnosis or treatment recommendation.';
+    const disclaimer =
+        '\n\nFor monitoring support only; not a diagnosis or treatment recommendation.';
     final message =
         'Blood pressure reading: $bpText mmHg (Highly At Risk). Inform the BHN today.$disclaimer';
 
@@ -316,6 +413,7 @@ class AppProvider extends ChangeNotifier {
     await _localNotif.showHighRiskAlert(
       patientName: name,
       message: notif.message,
+      alertId: notif.id,
     );
   }
 
@@ -336,6 +434,7 @@ class AppProvider extends ChangeNotifier {
     String? observations,
     DateTime? visitDate,
   }) async {
+    await _requireAssignedPatient(patientId);
     final riskLevel = RiskClassifier.classify(
           bloodGlucose: bloodGlucose,
           systolicBP: systolicBP,
@@ -423,6 +522,11 @@ class AppProvider extends ChangeNotifier {
     String? dosage,
     String? observations,
   }) async {
+    await _requireAssignedPatient(original.patientId);
+    if (original.bhwId != currentUser!.id) {
+      throw StateError(
+          'Only the worker who recorded this visit can correct it.');
+    }
     final riskLevel = RiskClassifier.classify(
           bloodGlucose: bloodGlucose,
           systolicBP: systolicBP,
@@ -495,10 +599,10 @@ class AppProvider extends ChangeNotifier {
               original.systolicBP! >= AppConstants.systolicHighRisk) ||
           (original.diastolicBP != null &&
               original.diastolicBP! >= AppConstants.diastolicHighRisk);
-      final isHighBp = (systolicBP != null &&
-              systolicBP >= AppConstants.systolicHighRisk) ||
-          (diastolicBP != null &&
-              diastolicBP >= AppConstants.diastolicHighRisk);
+      final isHighBp =
+          (systolicBP != null && systolicBP >= AppConstants.systolicHighRisk) ||
+              (diastolicBP != null &&
+                  diastolicBP >= AppConstants.diastolicHighRisk);
       if (isHighBp && !wasHighBp) {
         await _raiseHighBpAlert(
             original.patientId, systolicBP, diastolicBP, DateTime.now());
@@ -512,11 +616,18 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<void> addPatient(Patient patient) async {
+    if (patient.assignedBhwId != currentUser?.id) {
+      throw StateError('New patients must be assigned to your account.');
+    }
     await _db.insertPatient(patient);
     await loadAll();
   }
 
   Future<void> updatePatient(Patient patient) async {
+    await _requireAssignedPatient(patient.id);
+    if (patient.assignedBhwId != currentUser?.id) {
+      throw StateError('Only the RHU can reassign a patient.');
+    }
     await _db.updatePatient(patient);
     await loadAll();
   }
@@ -539,19 +650,65 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<void> markNotificationRead(String id) async {
-    await _db.markNotificationRead(id);
+    final uid = currentUser?.id;
+    final matches = _notifications
+        .where((n) => n.id == id && !n.isRead && !n.resolved)
+        .toList();
+    if (uid == null || matches.isEmpty) return;
+    final handledAt = DateTime.now();
+    await _db.markNotificationRead(id, at: handledAt);
+    if (currentUser?.id != uid) return;
     _notifications = _notifications.map((n) {
-      if (n.id == id) return n.copyWith(isRead: true);
+      if (n.id == id) {
+        return n.copyWith(
+            isRead: true, isSynced: false, handledAt: n.handledAt ?? handledAt);
+      }
       return n;
     }).toList();
     notifyListeners();
+    await _acknowledgeAlert(
+        uid,
+        matches.first
+            .copyWith(handledAt: matches.first.handledAt ?? handledAt));
   }
 
   Future<void> markAllNotificationsRead() async {
-    await _db.markAllNotificationsRead(currentUser!.id);
-    _notifications =
-        _notifications.map((n) => n.copyWith(isRead: true)).toList();
+    final uid = currentUser?.id;
+    if (uid == null) return;
+    final unread =
+        _notifications.where((n) => !n.isRead && !n.resolved).toList();
+    final handledAt = DateTime.now();
+    await _db.markAllNotificationsRead(uid, at: handledAt);
+    if (currentUser?.id != uid) return;
+    _notifications = _notifications
+        .map((n) => n.isRead || n.resolved
+            ? n
+            : n.copyWith(
+                isRead: true,
+                isSynced: false,
+                handledAt: n.handledAt ?? handledAt))
+        .toList();
     notifyListeners();
+    for (final notification in unread) {
+      await _acknowledgeAlert(
+          uid,
+          notification.copyWith(
+              handledAt: notification.handledAt ?? handledAt));
+    }
+  }
+
+  Future<void> _acknowledgeAlert(
+      String uid, NotificationModel notification) async {
+    await _localNotif.cancelAlert(notification.id);
+    // Also clear tray entries created by older app versions.
+    await _localNotif.cancelPatientAlerts(notification.patientName);
+    if (currentUser?.id != uid) return;
+    try {
+      await _sync.pushAlert(
+          uid, notification.copyWith(isRead: true, isSynced: false));
+    } catch (_) {
+      // The local acknowledgement remains queued for the next online sync.
+    }
   }
 
   Future<SyncResult> syncAll() async {

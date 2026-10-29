@@ -35,6 +35,11 @@ class _MainScreenState extends State<MainScreen> {
     _connectivitySub = SyncService().onConnectivityRestored.listen((_) {
       _checkAndPromptSync();
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (await SyncService().isOnline && mounted) {
+        await _checkAndPromptSync();
+      }
+    });
   }
 
   @override
@@ -54,6 +59,10 @@ class _MainScreenState extends State<MainScreen> {
       _promptShowing = true;
       await SyncPromptDialog.show(context, count);
       _promptShowing = false;
+    } else if (mounted) {
+      // A worker with no uploads may still have newly assigned RHU patients
+      // or alerts waiting. Pull them on sign-in and after reconnecting.
+      await provider.syncAll();
     }
   }
 

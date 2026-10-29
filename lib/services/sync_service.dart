@@ -17,12 +17,14 @@ class SyncResult {
   final bool success;
   final int syncedPatients;
   final int syncedRecords;
+  final int syncedAlerts;
   final String message;
 
   SyncResult({
     required this.success,
     this.syncedPatients = 0,
     this.syncedRecords = 0,
+    this.syncedAlerts = 0,
     required this.message,
   });
 }
@@ -30,14 +32,21 @@ class SyncResult {
 class SyncService {
   static final SyncService _instance = SyncService._internal();
   factory SyncService() => _instance;
-  SyncService._internal() {
+  SyncService._internal()
+      : _db = DatabaseHelper(),
+        _firestore = FirebaseFirestore.instance {
     _initConnectivityListener();
   }
 
+  SyncService.withStores(
+      {required DatabaseHelper database, required FirebaseFirestore firestore})
+      : _db = database,
+        _firestore = firestore;
+
   static const _keyLastSync = 'last_sync_timestamp';
-  final _db = DatabaseHelper();
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final FirebaseAuth _auth = FirebaseAuth.instance;
+  final DatabaseHelper _db;
+  final FirebaseFirestore _firestore;
+  FirebaseAuth get _auth => FirebaseAuth.instance;
   final _uuid = const Uuid();
 
   bool _isSyncing = false;
@@ -69,8 +78,10 @@ class SyncService {
   }
 
   Future<String?> getLastSyncTime() async {
+    final uid = AuthService().currentUser?.id;
+    if (uid == null) return null;
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_keyLastSync);
+    return prefs.getString('${_keyLastSync}_$uid');
   }
 
   Future<int> getUnsyncedCount(String bhwId) async {
@@ -82,6 +93,11 @@ class SyncService {
   }
 
   Future<SyncResult> syncAll(String bhwId) async {
+    if (_auth.currentUser?.uid != bhwId ||
+        AuthService().currentUser?.id != bhwId) {
+      return SyncResult(
+          success: false, message: 'Please sign in again before syncing.');
+    }
     if (_isSyncing) {
       return SyncResult(
         success: false,
@@ -95,6 +111,8 @@ class SyncService {
 
     int syncedPatients = 0;
     int syncedRecords = 0;
+    int syncedAlerts = 0;
+    int totalAttemptRecords = 0;
     // Visits that belong to the RHU (not created by this worker). They are
     // never uploaded, so they count as "handled", not as failures.
     int skippedRecords = 0;
@@ -105,58 +123,69 @@ class SyncService {
     final List<String> errors = [];
     final Set<String> failedPatientIds = {};
 
-    // 1. Gather all unsynced items from local SQLite
-    final unsyncedPatients = await _db.getUnsyncedPatients(bhwId);
-    final unsyncedRecords = await _db.getUnsyncedRecords(bhwId);
-    final totalAttemptRecords = unsyncedPatients.length + unsyncedRecords.length;
+    try {
+      totalAttemptRecords = await _db.getUnsyncedCount(bhwId);
 
-    // Check connectivity
-    final online = await isOnline;
-    if (!online) {
-      final log = SyncLog(
-        id: logId,
-        bhwId: bhwId,
-        timestamp: attemptTime,
-        recordCount: totalAttemptRecords,
-        syncedPatients: 0,
-        syncedRecords: 0,
-        status: 'failed',
-        errorMessage: 'No internet connection. Records remain saved offline.',
-      );
-      await _db.insertSyncLog(log);
-      _isSyncing = false;
-      return SyncResult(
-        success: false,
-        message: 'No internet connection. Records remain saved offline.',
-      );
-    }
+      // Check connectivity
+      final online = await isOnline;
+      if (!online) {
+        final log = SyncLog(
+          id: logId,
+          bhwId: bhwId,
+          timestamp: attemptTime,
+          recordCount: totalAttemptRecords,
+          syncedPatients: 0,
+          syncedRecords: 0,
+          status: 'failed',
+          errorMessage: 'No internet connection. Records remain saved offline.',
+        );
+        await _db.insertSyncLog(log);
+        _isSyncing = false;
+        return SyncResult(
+          success: false,
+          message: 'No internet connection. Records remain saved offline.',
+        );
+      }
 
-    /* Every write below is authorised as this Firebase user. Without a
+      /* Every write below is authorised as this Firebase user. Without a
        session the server refuses all of them, and the worker would see a
        raw permission error instead of being told what to do about it.
        Signing in is online-only, so this is recoverable: connect, sign in
        once, and the queue goes up untouched. */
-    if (_auth.currentUser == null) {
-      const msg = 'Your session has expired. Please sign in again while '
-          'you have internet — your saved records are safe and will sync '
-          'right after.';
-      final log = SyncLog(
-        id: logId,
-        bhwId: bhwId,
-        timestamp: attemptTime,
-        recordCount: totalAttemptRecords,
-        syncedPatients: 0,
-        syncedRecords: 0,
-        status: 'failed',
-        errorMessage: msg,
-      );
-      await _db.insertSyncLog(log);
-      _isSyncing = false;
-      return SyncResult(success: false, message: msg);
-    }
+      if (_auth.currentUser == null) {
+        const msg = 'Your session has expired. Please sign in again while '
+            'you have internet — your saved records are safe and will sync '
+            'right after.';
+        final log = SyncLog(
+          id: logId,
+          bhwId: bhwId,
+          timestamp: attemptTime,
+          recordCount: totalAttemptRecords,
+          syncedPatients: 0,
+          syncedRecords: 0,
+          status: 'failed',
+          errorMessage: msg,
+        );
+        await _db.insertSyncLog(log);
+        _isSyncing = false;
+        return SyncResult(success: false, message: msg);
+      }
 
-    try {
-      final uid = _auth.currentUser!.uid;
+      if (_auth.currentUser?.uid != bhwId ||
+          AuthService().currentUser?.id != bhwId) {
+        throw StateError('The signed-in account changed during sync.');
+      }
+      final uid = bhwId;
+
+      // Fetch current assignments from the server before uploading cached work.
+      // A former worker must never reclaim a reassigned patient during sync.
+      final receivedBefore = await _pullFromFirestore(uid);
+      final unsyncedPatients = await _db.getUnsyncedPatients(uid);
+      final unsyncedRecords = await _db.getUnsyncedRecords(uid);
+      final unsyncedAlerts = await _db.getUnsyncedNotifications(uid);
+      totalAttemptRecords = unsyncedPatients.length +
+          unsyncedRecords.length +
+          unsyncedAlerts.length;
 
       // 2. Upload unsynced patients to Firestore with server confirmation
       for (final p in unsyncedPatients) {
@@ -208,9 +237,8 @@ class SyncService {
       final deactivated = await _isDeactivated(uid);
 
       final worker = await _db.getUserById(uid);
-      final recordedBy = worker == null
-          ? ''
-          : '${worker.firstName} ${worker.lastName}'.trim();
+      final recordedBy =
+          worker == null ? '' : '${worker.firstName} ${worker.lastName}'.trim();
 
       // 3. Upload unsynced health records to Firestore with server confirmation
       for (final r in unsyncedRecords) {
@@ -273,9 +301,15 @@ class SyncService {
             'patientId': r.patientId,
             'bhwId': uid,
             'assignedBhwId': uid,
-            'bloodGlucose': (r.bloodGlucose != null && r.bloodGlucose! > 0) ? r.bloodGlucose : null,
-            'systolicBP': (r.systolicBP != null && r.systolicBP! > 0) ? r.systolicBP : null,
-            'diastolicBP': (r.diastolicBP != null && r.diastolicBP! > 0) ? r.diastolicBP : null,
+            'bloodGlucose': (r.bloodGlucose != null && r.bloodGlucose! > 0)
+                ? r.bloodGlucose
+                : null,
+            'systolicBP': (r.systolicBP != null && r.systolicBP! > 0)
+                ? r.systolicBP
+                : null,
+            'diastolicBP': (r.diastolicBP != null && r.diastolicBP! > 0)
+                ? r.diastolicBP
+                : null,
             'bmi': (r.bmi != null && r.bmi! > 0) ? r.bmi : null,
             'height': r.height,
             'weight': r.weight,
@@ -312,6 +346,21 @@ class SyncService {
         }
       }
 
+      // Alerts have their own durable upload queue, including read/resolved
+      // changes. Uploading just patient vitals lost high-BP and overdue alerts.
+      for (final notification in unsyncedAlerts) {
+        if (failedPatientIds.contains(notification.patientId)) {
+          heldBackRecords++;
+          continue;
+        }
+        try {
+          await pushAlert(uid, notification);
+          syncedAlerts++;
+        } catch (e) {
+          errors.add('Alert for "${notification.patientName}": $e');
+        }
+      }
+
       // 4. Pull this worker's own patients and visits back down.
       //
       // Without this the sync is one-way: a correction a nurse makes at
@@ -320,13 +369,14 @@ class SyncService {
       // reinstalls the app or signs in on a replacement phone sees an
       // empty roster even though everything they recorded is safely on
       // the server.
-      final pulled = await _pullFromFirestore(uid);
+      final pulled = receivedBefore + await _pullFromFirestore(uid);
+      await pullAlerts(uid);
 
       // Determine attempt status. Held-back visits are not failures — they
       // go up on the next attempt — so they are excluded from the totals
       // that decide success / partial / failed.
       final effectiveTotal = totalAttemptRecords - heldBackRecords;
-      final totalSynced = syncedPatients + syncedRecords;
+      final totalSynced = syncedPatients + syncedRecords + syncedAlerts;
       final totalHandled = totalSynced + skippedRecords;
       final String status;
       if (effectiveTotal == 0) {
@@ -368,16 +418,16 @@ class SyncService {
 
       if (status == 'success' || status == 'partial') {
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setString(_keyLastSync, DateTime.now().toIso8601String());
+        await prefs.setString(
+            '${_keyLastSync}_$uid', DateTime.now().toIso8601String());
       }
 
       if (deactivated) {
         await AuthService().logout();
       }
 
-      final String pulledNote = pulled > 0
-          ? ' Received $pulled updates from the RHU.'
-          : '';
+      final String pulledNote =
+          pulled > 0 ? ' Received $pulled updates from the RHU.' : '';
 
       final String message;
       if (deactivated) {
@@ -387,18 +437,20 @@ class SyncService {
       } else if (status == 'success') {
         message = totalAttemptRecords == 0
             ? 'Nothing to send. All your records are already saved to the RHU.$pulledNote'
-            : 'Sync complete. $syncedPatients patients and $syncedRecords visits were sent to the RHU.$pulledNote';
+            : 'Sync complete. $syncedPatients patients, $syncedRecords visits and $syncedAlerts alerts were sent to the RHU.$pulledNote';
       } else if (status == 'partial') {
         message =
             'Partially synced: $syncedPatients patient(s) and $syncedRecords visit(s) uploaded. Some items failed and will be retried on next sync.';
       } else {
-        message = 'Sync failed: ${errorMessage ?? "Server error"}. Records remain saved offline.';
+        message =
+            'Sync failed: ${errorMessage ?? "Server error"}. Records remain saved offline.';
       }
 
       return SyncResult(
         success: status == 'success',
         syncedPatients: syncedPatients,
         syncedRecords: syncedRecords,
+        syncedAlerts: syncedAlerts,
         message: message,
       );
     } catch (e) {
@@ -409,7 +461,9 @@ class SyncService {
         recordCount: totalAttemptRecords,
         syncedPatients: syncedPatients,
         syncedRecords: syncedRecords,
-        status: (syncedPatients + syncedRecords > 0) ? 'partial' : 'failed',
+        status: (syncedPatients + syncedRecords + syncedAlerts > 0)
+            ? 'partial'
+            : 'failed',
         errorMessage: e.toString(),
       );
       await _db.insertSyncLog(log);
@@ -446,7 +500,30 @@ class SyncService {
       final patientSnap = await _firestore
           .collection('patients')
           .where('assignedBhwId', isEqualTo: uid)
-          .get();
+          .get(const GetOptions(source: Source.server));
+
+      final activeIds = patientSnap.docs
+          .where((doc) =>
+              doc.data()['isArchived'] != true &&
+              (doc.data()['status'] as String? ?? '').toLowerCase() !=
+                  'inactive')
+          .map((doc) => doc.id)
+          .toSet();
+      final cachedPatients = await _db.getPatientsByBhw(uid);
+      final cachedAlerts = await _db.getNotificationsByBhw(uid);
+      await _db.reconcileAssignments(uid, activeIds);
+      for (final alert in cachedAlerts) {
+        if (!activeIds.contains(alert.patientId)) {
+          await LocalNotificationService().cancelAlert(alert.id);
+        }
+      }
+      for (final patient in cachedPatients) {
+        if (!activeIds.contains(patient.id) &&
+            (await _db.getPatientById(patient.id))?.assignedBhwId != uid) {
+          await LocalNotificationService()
+              .cancelPatientAlerts(patient.fullName);
+        }
+      }
 
       for (final doc in patientSnap.docs) {
         final data = doc.data();
@@ -454,8 +531,18 @@ class SyncService {
         final remoteUpdated = _asDate(data['updatedAt']) ?? DateTime.now();
         final local = await _db.getPatientById(doc.id);
 
-        if (local != null && !local.isSynced) continue;
-        if (local != null && !remoteUpdated.isAfter(local.updatedAt)) continue;
+        if (local != null &&
+            !local.isSynced &&
+            local.assignedBhwId == uid &&
+            activeIds.contains(doc.id)) {
+          continue;
+        }
+        if (local != null &&
+            local.assignedBhwId == uid &&
+            activeIds.contains(doc.id) &&
+            !remoteUpdated.isAfter(local.updatedAt)) {
+          continue;
+        }
 
         final patient = Patient(
           id: doc.id,
@@ -500,34 +587,34 @@ class SyncService {
         }
       }
 
-      final recordSnap = await _firestore
-          .collection('health_records')
-          .where('assignedBhwId', isEqualTo: uid)
-          .get();
+      final recordDocs =
+          await _assignedDocuments('health_records', uid, activeIds);
 
-      for (final doc in recordSnap.docs) {
+      for (final doc in recordDocs) {
         final data = doc.data();
         final remoteUpdated = _asDate(data['updatedAt']) ?? DateTime.now();
         final local = await _db.getRecordById(doc.id);
 
-        if (local != null && !local.isSynced) continue;
-        if (local != null && !remoteUpdated.isAfter(local.updatedAt)) continue;
+        if (local != null && !local.isSynced && local.bhwId == uid) continue;
+        if (local != null &&
+            local.isSynced &&
+            !remoteUpdated.isAfter(local.updatedAt)) {
+          continue;
+        }
 
         // A visit whose patient is not on this phone has nowhere to live:
         // the record screens all read through a patient. It is left on the
         // server rather than inserted as an orphan.
         final patientId = data['patientId'] as String? ?? '';
-        if (patientId.isEmpty) continue;
+        if (!activeIds.contains(patientId)) continue;
         if (await _db.getPatientById(patientId) == null) continue;
 
         final record = HealthRecord(
           id: doc.id,
           patientId: patientId,
-          // An RHU visit carries no bhwId. Filing it under this worker is
-          // what puts it in their own Records tab alongside their visits.
-          bhwId: (data['bhwId'] as String?)?.isNotEmpty == true
-              ? data['bhwId'] as String
-              : uid,
+          // Preserve the real author. Visibility follows the patient's
+          // assignment, while corrections remain limited to the author.
+          bhwId: data['bhwId'] as String? ?? '',
           bloodGlucose: _asNullableDouble(data['bloodGlucose']),
           systolicBP: _asNullableDouble(data['systolicBP']),
           diastolicBP: _asNullableDouble(data['diastolicBP']),
@@ -551,14 +638,146 @@ class SyncService {
         changed++;
       }
     } catch (_) {
-      // A failed pull does not invalidate the push that just succeeded.
-      // The next sync tries again.
+      // Never accept an incomplete or cached roster as assignment authority.
+      rethrow;
     }
     return changed;
   }
 
-  /// Looks for a patient with the same name and birth date already on the
-  /// register, whoever put them there.
+  Future<void> pushAlert(String uid, NotificationModel notification) async {
+    final patient = await _db.getPatientById(notification.patientId);
+    if (patient == null || patient.assignedBhwId != uid) {
+      throw StateError('This patient is no longer assigned to your account.');
+    }
+    final ref = _firestore.collection('alerts').doc(notification.id);
+    await _firestore.runTransaction((transaction) async {
+      final existing = await transaction.get(ref);
+      if (existing.exists) {
+        final remoteRaised = _asDate(existing.data()?['raisedAt']);
+        if (remoteRaised != null &&
+            remoteRaised.millisecondsSinceEpoch !=
+                notification.createdAt.millisecondsSinceEpoch) {
+          // The RHU has raised a new event under this deterministic id.
+          // Discard old acknowledgements and pull the current event below.
+          return;
+        }
+        // Reading an alert is not resolving it. Preserve acknowledgements made
+        // at the RHU; an old phone must not reopen or mark them unread.
+        final changes = <String, dynamic>{
+          'updatedAt': FieldValue.serverTimestamp()
+        };
+        if (notification.isRead) {
+          changes['acknowledged'] = true;
+          if (existing.data()?['acknowledgedAt'] == null) {
+            changes['acknowledgedAt'] = Timestamp.fromDate(
+                notification.handledAt ?? notification.createdAt);
+          }
+        }
+        if (notification.resolved) {
+          changes['resolved'] = true;
+          if (existing.data()?['resolvedAt'] == null) {
+            changes['resolvedAt'] = Timestamp.fromDate(
+                notification.handledAt ?? notification.createdAt);
+          }
+        }
+        transaction.update(ref, changes);
+      } else {
+        transaction.set(ref, {
+          'patientId': notification.patientId,
+          'patientName': notification.patientName,
+          'barangay': patient.barangay,
+          'assignedBhwId': uid,
+          'type':
+              notification.type == 'high_risk' ? 'critical' : notification.type,
+          'trigger': notification.message,
+          'source': 'app',
+          'acknowledged': notification.isRead,
+          'resolved': notification.resolved,
+          'acknowledgedAt': notification.isRead
+              ? Timestamp.fromDate(
+                  notification.handledAt ?? notification.createdAt)
+              : null,
+          'resolvedAt': notification.resolved
+              ? Timestamp.fromDate(
+                  notification.handledAt ?? notification.createdAt)
+              : null,
+          'raisedAt': Timestamp.fromDate(notification.createdAt),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+    });
+    await _db.markNotificationSynced(notification.id, uploaded: notification);
+  }
+
+  Future<void> pullAlerts(String uid) async {
+    final patients = await _firestore
+        .collection('patients')
+        .where('assignedBhwId', isEqualTo: uid)
+        .get(const GetOptions(source: Source.server));
+    final patientIds = patients.docs
+        .where((doc) =>
+            doc.data()['isArchived'] != true &&
+            (doc.data()['status'] as String? ?? '').toLowerCase() != 'inactive')
+        .map((doc) => doc.id)
+        .toSet();
+    final alerts = await _assignedDocuments('alerts', uid, patientIds);
+    for (final doc in alerts) {
+      final data = doc.data();
+      final patientId = data['patientId'] as String? ?? '';
+      final patient = await _db.getPatientById(patientId);
+      if (patient == null ||
+          patient.assignedBhwId != uid ||
+          patient.status == 'Inactive') {
+        continue;
+      }
+      final type = data['type'] as String? ?? 'critical';
+      final handledDates = [
+        _asDate(data['acknowledgedAt']),
+        _asDate(data['resolvedAt'])
+      ].whereType<DateTime>().toList()
+        ..sort();
+      if (data['acknowledged'] == true || data['resolved'] == true) {
+        await LocalNotificationService().cancelAlert(doc.id);
+        await LocalNotificationService().cancelPatientAlerts(patient.fullName);
+      }
+      await _db.upsertRemoteNotification(NotificationModel(
+        id: doc.id,
+        patientId: patientId,
+        patientName: data['patientName'] as String? ?? patient.fullName,
+        type: type == 'critical'
+            ? 'high_risk'
+            : type == 'atrisk'
+                ? 'at_risk'
+                : type,
+        message: data['trigger'] as String? ?? '',
+        isRead: data['acknowledged'] == true || data['resolved'] == true,
+        resolved: data['resolved'] == true,
+        isSynced: true,
+        createdAt: _asDate(data['raisedAt']) ?? DateTime.now(),
+        handledAt: handledDates.firstOrNull,
+      ));
+    }
+  }
+
+  /// Constrain both fields so security rules can prove patient ownership.
+  /// Ten patients per query also stays within the rule document-lookup limit.
+  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _assignedDocuments(
+      String collection, String uid, Set<String> patientIds) async {
+    final ids = patientIds.toList();
+    final documents = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+    for (var offset = 0; offset < ids.length; offset += 10) {
+      final snapshot = await _firestore
+          .collection(collection)
+          .where('assignedBhwId', isEqualTo: uid)
+          .where('patientId', whereIn: ids.skip(offset).take(10).toList())
+          .get(const GetOptions(source: Source.server));
+      documents.addAll(snapshot.docs);
+    }
+    return documents;
+  }
+
+  /// Looks for a duplicate among this worker's assigned patients. Other
+  /// workers' registrations are private and cannot be queried by this phone.
   ///
   /// The local check only sees this worker's own SQLite, so two BHWs
   /// covering neighbouring puroks could each register the same person and
@@ -579,6 +798,7 @@ class SyncService {
     try {
       final snap = await _firestore
           .collection('patients')
+          .where('assignedBhwId', isEqualTo: _auth.currentUser!.uid)
           .where('firstName', isEqualTo: firstName)
           .where('lastName', isEqualTo: lastName)
           .get()
@@ -624,8 +844,9 @@ class SyncService {
         : '${patient.fullName} has been flagged for follow-up by the RHU: '
             '$reason';
     try {
+      final alertId = _uuid.v4();
       await _db.insertNotification(NotificationModel(
-        id: _uuid.v4(),
+        id: alertId,
         patientId: patient.id,
         patientName: patient.fullName,
         type: 'flagged',
@@ -636,6 +857,7 @@ class SyncService {
       await LocalNotificationService().showHighRiskAlert(
         patientName: patient.fullName,
         message: message,
+        alertId: alertId,
       );
     } catch (_) {
       // A notification that cannot be shown must not fail the sync.
@@ -649,7 +871,8 @@ class SyncService {
     try {
       final snap = await _firestore.collection('users').doc(uid).get();
       if (!snap.exists) return false;
-      final status = (snap.data()?['status'] as String? ?? 'active').toLowerCase();
+      final status =
+          (snap.data()?['status'] as String? ?? 'active').toLowerCase();
       return status != 'active';
     } catch (_) {
       return false;

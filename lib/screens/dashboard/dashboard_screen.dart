@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../../providers/app_provider.dart';
 import '../../models/user_model.dart';
+import '../../models/health_record.dart';
 import '../../utils/theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/shared_widgets.dart';
@@ -108,14 +109,15 @@ class DashboardScreen extends StatelessWidget {
                         // things before deciding what to do about it, so
                         // situational numbers come before action shortcuts.
                         const SectionHeader('Overview'),
-                        const SizedBox(height: 0),
+                        const SizedBox(height: 12),
                         GridView.count(
+                          padding: EdgeInsets.zero,
                           crossAxisCount: 2,
                           shrinkWrap: true,
                           physics: const NeverScrollableScrollPhysics(),
                           crossAxisSpacing: 10,
                           mainAxisSpacing: 10,
-                          childAspectRatio: 1.3,
+                          mainAxisExtent: _summaryCardHeight(context),
                           children: [
                             SummaryCard(
                               title: 'Total Patients',
@@ -192,17 +194,21 @@ class DashboardScreen extends StatelessWidget {
                             ),
                           ],
                         ),
-                        const SizedBox(height: 24),
+                        const SizedBox(height: 18),
 
                         // Recent records
                         if (provider.recentRecords.isNotEmpty) ...[
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              const SectionHeader('Recent Records'),
+                              const Expanded(child: SectionHeader('Recent Records')),
                               TextButton(
                                 onPressed: () => provider.setTab(2),
-                                child: const Text('View All', style: TextStyle(fontSize: 13)),
+                                style: TextButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                                child: const Text('View All', style: TextStyle(fontSize: 14)),
                               ),
                             ],
                           ),
@@ -476,8 +482,8 @@ class _QuickAction extends StatelessWidget {
         boxShadow: [
           BoxShadow(
             color: color.withValues(alpha: 0.35),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
           ),
         ],
       ),
@@ -487,7 +493,7 @@ class _QuickAction extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 14),
+            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
             child: Row(
               children: [
                 Container(
@@ -498,14 +504,14 @@ class _QuickAction extends StatelessWidget {
                   ),
                   child: Icon(icon, color: Colors.white, size: 18),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     label,
                     style: const TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.w700,
-                      fontSize: 13,
+                      fontSize: 14,
                     ),
                   ),
                 ),
@@ -518,8 +524,9 @@ class _QuickAction extends StatelessWidget {
   }
 }
 
-class _RecentRecordRow extends StatelessWidget {  final String patientName;
-  final dynamic record;
+class _RecentRecordRow extends StatelessWidget {
+  final String patientName;
+  final HealthRecord record;
   final VoidCallback onTap;
 
   const _RecentRecordRow({
@@ -530,6 +537,11 @@ class _RecentRecordRow extends StatelessWidget {  final String patientName;
 
   @override
   Widget build(BuildContext context) {
+    final metrics = <String>[
+      if (record.bloodGlucose != null && record.bloodGlucose! > 0)
+        'Glucose: ${record.bloodGlucose!.toStringAsFixed(0)} mg/dL',
+      if (record.bloodPressure != '\u2014') 'BP: ${record.bloodPressure}',
+    ];
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
@@ -543,32 +555,40 @@ class _RecentRecordRow extends StatelessWidget {  final String patientName;
         child: InkWell(
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            child: Row(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
                         patientName,
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                       ),
-                      Text(
-                        (record.bloodGlucose != null && record.bloodGlucose! > 0)
-                            ? 'Glucose: ${record.bloodGlucose!.toStringAsFixed(0)} • BP: ${record.bloodPressure}'
-                            : (record.bloodPressure != '—'
-                                ? 'BP: ${record.bloodPressure}'
-                                : 'Visit recorded'),
-                        style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: RiskBadge(
+                            riskLevel: record.riskLevel,
+                            compact: true,
+                            score: RiskClassifier.calculateRiskScore(record.bloodGlucose),
+                          ),
+                        ),
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-                RiskBadge(
-                  riskLevel: record.riskLevel,
-                  compact: true,
-                  score: RiskClassifier.calculateRiskScore(record.bloodGlucose),
+                const SizedBox(height: 4),
+                Text(
+                  metrics.isEmpty ? 'Visit recorded' : metrics.join(' \u2022 '),
+                  style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
                 ),
               ],
             ),
@@ -577,6 +597,12 @@ class _RecentRecordRow extends StatelessWidget {  final String patientName;
       ),
     );
   }
+}
+
+// Keep the grid compact at normal sizes, with room for larger system text.
+double _summaryCardHeight(BuildContext context) {
+  final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
+  return 112 + (textScale > 1 ? (textScale - 1) * 80 : 0);
 }
 
 /// Skeleton loading state — mirrors the real layout's shape (hero, quick
@@ -597,12 +623,13 @@ class _DashboardSkeleton extends StatelessWidget {
           const SkeletonBox(width: 85, height: 16),
           const SizedBox(height: 10),
           GridView.count(
+            padding: EdgeInsets.zero,
             crossAxisCount: 2,
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
             crossAxisSpacing: 10,
             mainAxisSpacing: 10,
-            childAspectRatio: 1.3,
+            mainAxisExtent: _summaryCardHeight(context),
             children: const [
               SkeletonBox(borderRadius: BorderRadius.all(Radius.circular(18))),
               SkeletonBox(borderRadius: BorderRadius.all(Radius.circular(18))),
@@ -615,12 +642,12 @@ class _DashboardSkeleton extends StatelessWidget {
           const SizedBox(height: 10),
           const Row(
             children: [
-              Expanded(child: SkeletonBox(height: 56, borderRadius: BorderRadius.all(Radius.circular(18)))),
+              Expanded(child: SkeletonBox(height: 62, borderRadius: BorderRadius.all(Radius.circular(18)))),
               SizedBox(width: 10),
-              Expanded(child: SkeletonBox(height: 56, borderRadius: BorderRadius.all(Radius.circular(18)))),
+              Expanded(child: SkeletonBox(height: 62, borderRadius: BorderRadius.all(Radius.circular(18)))),
             ],
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 18),
           const SkeletonBox(width: 130, height: 16),
           const SizedBox(height: 10),
           ...List.generate(

@@ -6,6 +6,7 @@ import '../../providers/app_provider.dart';
 import '../../models/patient.dart';
 import '../../utils/theme.dart';
 import '../../utils/constants.dart';
+import '../../widgets/shared_widgets.dart';
 
 class AddPatientScreen extends StatefulWidget {
   /// When provided, the screen edits this patient instead of adding a new one.
@@ -111,12 +112,6 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
       // the picker would happily accept a diagnosis year before they were born.
       firstDate: isBirth ? DateTime(1920) : (_birthDate ?? DateTime(1950)),
       lastDate: DateTime.now(),
-      builder: (ctx, child) => Theme(
-        data: ThemeData.light().copyWith(
-          colorScheme: const ColorScheme.light(primary: AppColors.primary),
-        ),
-        child: child!,
-      ),
     );
     if (picked != null) {
       setState(() {
@@ -367,6 +362,10 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.isEditing && !context.watch<AppProvider>().patients
+        .any((patient) => patient.id == widget.existingPatient!.id)) {
+      return const PatientAccessNotice();
+    }
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(title: Text(widget.isEditing ? 'Edit Patient' : 'Add New Patient')),

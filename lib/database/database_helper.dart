@@ -6,6 +6,8 @@ import '../models/user_model.dart';
 import '../models/notification_model.dart';
 import '../models/sync_log.dart';
 import '../utils/constants.dart';
+import '../utils/clinical_reset.dart';
+import '../services/local_notification_service.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper _instance = DatabaseHelper._internal();
@@ -78,6 +80,11 @@ class DatabaseHelper {
         // which would refuse exactly that visit on an upgraded phone.
         await _relaxHealthRecordVitals(db);
 
+        await ensureAssignmentSchema(db);
+        if (await applyClinicalReset(db, clinicalResetAt) > 0) {
+          await LocalNotificationService().cancelAll();
+        }
+
         // Follow-up flags raised by the RHU, added after the first field
         // build for the same reason as the columns above.
         for (final column in [
@@ -134,6 +141,72 @@ class DatabaseHelper {
         await _onCreate(db, newVersion);
       },
     );
+  }
+
+  /// Additive migration: preserve every offline patient and unsent visit.
+  static Future<void> ensureAssignmentSchema(Database db) async {
+    for (final entry in {
+      'patients': ['remoteKnown INTEGER NOT NULL DEFAULT 0'],
+      'notifications': [
+        'isSynced INTEGER NOT NULL DEFAULT 0',
+        'resolved INTEGER NOT NULL DEFAULT 0',
+        'handledAt TEXT',
+      ],
+    }.entries) {
+      final columns = await db.rawQuery('PRAGMA table_info(${entry.key})');
+      final existing = columns.map((column) => column['name']).toSet();
+      for (final definition in entry.value) {
+        if (!existing.contains(definition.split(' ').first)) {
+          await db.execute('ALTER TABLE ${entry.key} ADD COLUMN $definition');
+        }
+      }
+    }
+    await db.execute('UPDATE patients SET remoteKnown = 1 WHERE isSynced = 1');
+  }
+
+  /// Remove pre-reset patients and their clinical data, including unsent work.
+  /// This explicit reset keeps accounts and post-reset registrations intact.
+  static Future<int> applyClinicalReset(Database db, DateTime cutoff) async {
+    return db.transaction((transaction) async {
+      final patients =
+          await transaction.query('patients', columns: ['id', 'createdAt']);
+      final removed = patients.where((row) {
+        final created = DateTime.tryParse(row['createdAt'] as String? ?? '');
+        return created == null || created.isBefore(cutoff);
+      }).toList();
+      for (final patient in removed) {
+        for (final table in ['notifications', 'health_records']) {
+          await transaction.delete(table,
+              where: 'patientId = ?', whereArgs: [patient['id']]);
+        }
+        await transaction
+            .delete('patients', where: 'id = ?', whereArgs: [patient['id']]);
+      }
+      for (final table in ['notifications', 'health_records']) {
+        await transaction.execute(
+            'DELETE FROM $table WHERE patientId NOT IN (SELECT id FROM patients)');
+      }
+      return removed.length;
+    });
+  }
+
+  /// Revoke old cached assignments after a server-confirmed roster. Keep
+  /// unsent visits locally, and retain new registrations not yet uploaded.
+  Future<void> reconcileAssignments(
+      String bhwId, Set<String> assignedIds) async {
+    final db = await database;
+    final known = await db.query('patients',
+        columns: ['id'],
+        where: 'assignedBhwId = ? AND remoteKnown = 1',
+        whereArgs: [bhwId]);
+    final batch = db.batch();
+    for (final patient in known) {
+      if (!assignedIds.contains(patient['id'])) {
+        batch.update('patients', {'assignedBhwId': ''},
+            where: 'id = ?', whereArgs: [patient['id']]);
+      }
+    }
+    await batch.commit(noResult: true);
   }
 
   /// SQL twin of RiskClassifier.classify(). Glucose-only, same thresholds
@@ -272,7 +345,8 @@ class DatabaseHelper {
           isSynced INTEGER NOT NULL DEFAULT 0
         )
       ''');
-      await txn.execute('INSERT INTO patients_new ($keep) SELECT $keep FROM patients');
+      await txn.execute(
+          'INSERT INTO patients_new ($keep) SELECT $keep FROM patients');
       await txn.execute('DROP TABLE patients');
       await txn.execute('ALTER TABLE patients_new RENAME TO patients');
     });
@@ -319,7 +393,8 @@ class DatabaseHelper {
       await txn.execute(
           'INSERT INTO health_records_new ($keep) SELECT $keep FROM health_records');
       await txn.execute('DROP TABLE health_records');
-      await txn.execute('ALTER TABLE health_records_new RENAME TO health_records');
+      await txn
+          .execute('ALTER TABLE health_records_new RENAME TO health_records');
     });
   }
 
@@ -429,10 +504,10 @@ class DatabaseHelper {
     ''');
 
     // Insert demo BHW account
-    await _insertDemoData(db);
+    await _insertDemoAccounts(db);
   }
 
-  Future<void> _insertDemoData(Database db) async {
+  Future<void> _insertDemoAccounts(Database db) async {
     // Demo BHW account (password: bhw1234)
     // Hash = SHA-256(password + salt). See AuthService for the hashing logic.
     await db.insert('users', {
@@ -472,197 +547,14 @@ class DatabaseHelper {
       'createdAt': DateTime.now().toIso8601String(),
     });
 
-    // Demo patients
-    final now = DateTime.now();
-    final patients = [
-      {
-        'id': 'pat-001',
-        'firstName': 'Juan',
-        'lastName': 'Dela Cruz',
-        'middleName': 'Reyes',
-        'birthDate': '1965-04-12',
-        'sex': 'Male',
-        'barangay': 'Barangay San Jose',
-        'purok': 'Purok 3',
-        'contactNumber': '09171234567',
-        'diabetesType': 'Type 2',
-        'diagnosisDate': '2019-06-01',
-        'medications': 'Metformin 500mg',
-        'attendingPhysician': 'Dr. Reyes',
-        'emergencyContact': 'Ana Dela Cruz',
-        'emergencyContactNumber': '09181234567',
-        'assignedBhwId': 'bhw-001',
-        'status': 'Approved',
-        'riskLevel': 'Highly At Risk',
-        'createdAt': now.toIso8601String(),
-        'updatedAt': now.toIso8601String(),
-        'isSynced': 1,
-      },
-      {
-        'id': 'pat-002',
-        'firstName': 'Lourdes',
-        'lastName': 'Gomez',
-        'middleName': null,
-        'birthDate': '1972-09-25',
-        'sex': 'Female',
-        'barangay': 'Barangay San Jose',
-        'purok': 'Purok 3',
-        'contactNumber': '09191234567',
-        'diabetesType': 'Type 2',
-        'diagnosisDate': '2021-03-15',
-        'medications': 'Glipizide 5mg',
-        'attendingPhysician': null,
-        'emergencyContact': 'Pedro Gomez',
-        'emergencyContactNumber': '09201234567',
-        'assignedBhwId': 'bhw-001',
-        'status': 'Approved',
-        'riskLevel': 'At Risk',
-        'createdAt': now.toIso8601String(),
-        'updatedAt': now.toIso8601String(),
-        'isSynced': 1,
-      },
-      {
-        'id': 'pat-003',
-        'firstName': 'Roberto',
-        'lastName': 'Villanueva',
-        'middleName': 'Cruz',
-        'birthDate': '1958-01-30',
-        'sex': 'Male',
-        'barangay': 'Barangay San Jose',
-        'purok': 'Purok 3',
-        'contactNumber': '09261234567',
-        'diabetesType': 'Type 2',
-        'diagnosisDate': '2017-11-20',
-        'medications': 'Insulin Glargine',
-        'attendingPhysician': 'Dr. Lim',
-        'emergencyContact': 'Cecilia Villanueva',
-        'emergencyContactNumber': '09271234567',
-        'assignedBhwId': 'bhw-001',
-        'status': 'Approved',
-        'riskLevel': 'Normal',
-        'createdAt': now.toIso8601String(),
-        'updatedAt': now.toIso8601String(),
-        'isSynced': 1,
-      },
-    ];
-
-    for (final p in patients) {
-      await db.insert('patients', p);
-    }
-
-    // Demo health records. Glucose values are chosen so the seeded labels
-    // match the glucose-only tiers (<54 / >250 Highly At Risk,
-    // 54-69 / 181-250 At Risk, 70-180 Normal), so the reclassifier on
-    // first open has nothing to change.
-    final records = [
-      {
-        'id': 'rec-001',
-        'patientId': 'pat-001',
-        'bhwId': 'bhw-001',
-        'bloodGlucose': 260.0,
-        'systolicBP': 145.0,
-        'diastolicBP': 92.0,
-        'bmi': 28.5,
-        'medAdherence': 'missed',
-        'insulinUse': 1,
-        'medicationName': 'Insulin Glargine',
-        'dosage': '10 units, once daily (evening)',
-        'observations': 'Patient appears fatigued. Missed medication for 3 days.',
-        'riskLevel': 'Highly At Risk',
-        'visitDate': now.subtract(const Duration(days: 2)).toIso8601String(),
-        'createdAt': now.subtract(const Duration(days: 2)).toIso8601String(),
-        'updatedAt': now.subtract(const Duration(days: 2)).toIso8601String(),
-        'isSynced': 1,
-      },
-      {
-        'id': 'rec-002',
-        'patientId': 'pat-001',
-        'bhwId': 'bhw-001',
-        'bloodGlucose': 185.0,
-        'systolicBP': 138.0,
-        'diastolicBP': 88.0,
-        'bmi': 28.5,
-        'medAdherence': 'taken',
-        'insulinUse': 1,
-        'medicationName': 'Insulin Glargine',
-        'dosage': '10 units, once daily (evening)',
-        'observations': 'Slight improvement noted.',
-        'riskLevel': 'At Risk',
-        'visitDate': now.subtract(const Duration(days: 10)).toIso8601String(),
-        'createdAt': now.subtract(const Duration(days: 10)).toIso8601String(),
-        'updatedAt': now.subtract(const Duration(days: 10)).toIso8601String(),
-        'isSynced': 1,
-      },
-      {
-        'id': 'rec-003',
-        'patientId': 'pat-002',
-        'bhwId': 'bhw-001',
-        'bloodGlucose': 190.0,
-        'systolicBP': 133.0,
-        'diastolicBP': 85.0,
-        'bmi': 26.1,
-        'medAdherence': 'taken',
-        'insulinUse': 0,
-        'medicationName': 'Glipizide',
-        'dosage': '5mg, once daily (morning)',
-        'observations': 'Stable condition.',
-        'riskLevel': 'At Risk',
-        'visitDate': now.subtract(const Duration(days: 5)).toIso8601String(),
-        'createdAt': now.subtract(const Duration(days: 5)).toIso8601String(),
-        'updatedAt': now.subtract(const Duration(days: 5)).toIso8601String(),
-        'isSynced': 1,
-      },
-      {
-        'id': 'rec-004',
-        'patientId': 'pat-003',
-        'bhwId': 'bhw-001',
-        'bloodGlucose': 115.0,
-        'systolicBP': 118.0,
-        'diastolicBP': 76.0,
-        'bmi': 23.8,
-        'medAdherence': 'taken',
-        'insulinUse': 0,
-        'medicationName': 'Metformin',
-        'dosage': '500mg, twice daily',
-        'observations': 'Patient doing well.',
-        'riskLevel': 'Normal',
-        'visitDate': now.subtract(const Duration(days: 3)).toIso8601String(),
-        'createdAt': now.subtract(const Duration(days: 3)).toIso8601String(),
-        'updatedAt': now.subtract(const Duration(days: 3)).toIso8601String(),
-        'isSynced': 1,
-      },
-    ];
-
-    for (final r in records) {
-      await db.insert('health_records', r);
-    }
-
-    // Demo notifications
-    await db.insert('notifications', {
-      'id': 'notif-001',
-      'patientId': 'pat-001',
-      'patientName': 'Juan Dela Cruz',
-      'type': 'high_risk',
-      'message': 'Juan Dela Cruz has been classified as Highly At Risk. Immediate follow-up recommended.',
-      'isRead': 0,
-      'createdAt': now.subtract(const Duration(days: 2)).toIso8601String(),
-    });
-
-    await db.insert('notifications', {
-      'id': 'notif-002',
-      'patientId': 'pat-001',
-      'patientName': 'Juan Dela Cruz',
-      'type': 'no_visit',
-      'message': 'Juan Dela Cruz has not been visited in over 7 days.',
-      'isRead': 0,
-      'createdAt': now.subtract(const Duration(days: 1)).toIso8601String(),
-    });
+    // Clinical tables start empty; patient records are never seeded.
   }
 
   // ==================== USER ====================
   Future<UserModel?> getUserByUsername(String username) async {
     final db = await database;
-    final maps = await db.query('users', where: 'username = ?', whereArgs: [username]);
+    final maps =
+        await db.query('users', where: 'username = ?', whereArgs: [username]);
     if (maps.isEmpty) return null;
     return UserModel.fromMap(maps.first);
   }
@@ -685,7 +577,8 @@ class DatabaseHelper {
 
   /// Updates the stored hash + salt, and clears mustChangePassword (used both
   /// for voluntary password changes and the forced first-login change).
-  Future<bool> updatePassword(String userId, String newPasswordHash, String newSalt) async {
+  Future<bool> updatePassword(
+      String userId, String newPasswordHash, String newSalt) async {
     final db = await database;
     final count = await db.update(
       'users',
@@ -749,12 +642,24 @@ class DatabaseHelper {
 
   Future<void> insertPatient(Patient patient) async {
     final db = await database;
-    await db.insert('patients', patient.toMap(), conflictAlgorithm: ConflictAlgorithm.replace);
+    final existing = await db.query('patients',
+        columns: ['remoteKnown'], where: 'id = ?', whereArgs: [patient.id]);
+    await db.insert(
+        'patients',
+        {
+          ...patient.toMap(),
+          'remoteKnown': patient.isSynced ||
+                  (existing.isNotEmpty && existing.first['remoteKnown'] == 1)
+              ? 1
+              : 0,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<void> updatePatient(Patient patient) async {
     final db = await database;
-    await db.update('patients', patient.toMap(), where: 'id = ?', whereArgs: [patient.id]);
+    await db.update('patients', {...patient.toMap(), 'isSynced': 0},
+        where: 'id = ?', whereArgs: [patient.id]);
   }
 
   Future<void> updatePatientRisk(String patientId, String riskLevel) async {
@@ -767,7 +672,8 @@ class DatabaseHelper {
     );
   }
 
-  Future<bool> isDuplicatePatient(String firstName, String lastName, DateTime birthDate, String excludeId) async {
+  Future<bool> isDuplicatePatient(String firstName, String lastName,
+      DateTime birthDate, String excludeId) async {
     final db = await database;
     final maps = await db.query(
       'patients',
@@ -789,7 +695,8 @@ class DatabaseHelper {
     return maps.map((m) => HealthRecord.fromMap(m)).toList();
   }
 
-  Future<List<HealthRecord>> getRecentRecordsByBhw(String bhwId, {int limit = 10}) async {
+  Future<List<HealthRecord>> getRecentRecordsByBhw(String bhwId,
+      {int limit = 10}) async {
     final db = await database;
     final maps = await db.query(
       'health_records',
@@ -811,12 +718,11 @@ class DatabaseHelper {
   /// they reach 50 patients.
   Future<List<HealthRecord>> getAllRecordsByBhw(String bhwId) async {
     final db = await database;
-    final maps = await db.query(
-      'health_records',
-      where: 'bhwId = ?',
-      whereArgs: [bhwId],
-      orderBy: 'visitDate DESC',
-    );
+    final maps = await db.rawQuery('''
+      SELECT r.* FROM health_records r JOIN patients p ON p.id = r.patientId
+      WHERE p.assignedBhwId = ? AND p.status != 'Inactive'
+      ORDER BY r.visitDate DESC
+    ''', [bhwId]);
     return maps.map((m) => HealthRecord.fromMap(m)).toList();
   }
 
@@ -826,7 +732,7 @@ class DatabaseHelper {
   Future<int> getTotalRecordCountByBhw(String bhwId) async {
     final db = await database;
     final result = await db.rawQuery(
-      'SELECT COUNT(*) as count FROM health_records WHERE bhwId = ?',
+      "SELECT COUNT(*) as count FROM health_records r JOIN patients p ON p.id = r.patientId WHERE p.assignedBhwId = ? AND p.status != 'Inactive'",
       [bhwId],
     );
     return (result.first['count'] as int?) ?? 0;
@@ -853,7 +759,7 @@ class DatabaseHelper {
     final db = await database;
     final maps = await db.query(
       'patients',
-      where: 'assignedBhwId = ? AND isSynced = 0',
+      where: "assignedBhwId = ? AND isSynced = 0 AND status != 'Inactive'",
       whereArgs: [bhwId],
     );
     return maps.map((m) => Patient.fromMap(m)).toList();
@@ -861,34 +767,35 @@ class DatabaseHelper {
 
   Future<List<HealthRecord>> getUnsyncedRecords(String bhwId) async {
     final db = await database;
-    final maps = await db.query(
-      'health_records',
-      where: 'bhwId = ? AND isSynced = 0',
-      whereArgs: [bhwId],
-    );
+    final maps = await db.rawQuery('''
+      SELECT r.* FROM health_records r JOIN patients p ON p.id = r.patientId
+      WHERE r.bhwId = ? AND p.assignedBhwId = ? AND p.status != 'Inactive'
+        AND r.isSynced = 0
+    ''', [bhwId, bhwId]);
     return maps.map((m) => HealthRecord.fromMap(m)).toList();
   }
 
   Future<int> getUnsyncedCount(String bhwId) async {
     final db = await database;
     final pRes = await db.rawQuery(
-      'SELECT COUNT(*) as c FROM patients WHERE assignedBhwId = ? AND isSynced = 0',
+      "SELECT COUNT(*) as c FROM patients WHERE assignedBhwId = ? AND isSynced = 0 AND status != 'Inactive'",
       [bhwId],
     );
     final rRes = await db.rawQuery(
-      'SELECT COUNT(*) as c FROM health_records WHERE bhwId = ? AND isSynced = 0',
-      [bhwId],
+      "SELECT COUNT(*) as c FROM health_records r JOIN patients p ON p.id = r.patientId WHERE r.bhwId = ? AND p.assignedBhwId = ? AND p.status != 'Inactive' AND r.isSynced = 0",
+      [bhwId, bhwId],
     );
     final pCount = (pRes.first['c'] as int?) ?? 0;
     final rCount = (rRes.first['c'] as int?) ?? 0;
-    return pCount + rCount;
+    final alerts = await getUnsyncedNotifications(bhwId);
+    return pCount + rCount + alerts.length;
   }
 
   Future<void> markPatientSynced(String patientId) async {
     final db = await database;
     await db.update(
       'patients',
-      {'isSynced': 1},
+      {'isSynced': 1, 'remoteKnown': 1},
       where: 'id = ?',
       whereArgs: [patientId],
     );
@@ -946,7 +853,8 @@ class DatabaseHelper {
   /// original visit in place.
   Future<void> insertHealthRecord(HealthRecord record) async {
     final db = await database;
-    await db.insert('health_records', record.toMap(), conflictAlgorithm: ConflictAlgorithm.replace);
+    await db.insert('health_records', record.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<int> countHighRiskPatients(String bhwId) async {
@@ -960,7 +868,8 @@ class DatabaseHelper {
 
   Future<int> countUnvisitedPatients(String bhwId, int days) async {
     final db = await database;
-    final cutoff = DateTime.now().subtract(Duration(days: days)).toIso8601String();
+    final cutoff =
+        DateTime.now().subtract(Duration(days: days)).toIso8601String();
     // Patients with no record or last visit > days ago
     final result = await db.rawQuery('''
       SELECT COUNT(*) as count FROM patients p
@@ -1016,12 +925,64 @@ class DatabaseHelper {
 
   Future<void> insertNotification(NotificationModel notif) async {
     final db = await database;
-    await db.insert('notifications', notif.toMap(), conflictAlgorithm: ConflictAlgorithm.ignore);
+    await db.insert('notifications', notif.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.ignore);
   }
 
-  Future<void> markNotificationRead(String id) async {
+  Future<List<NotificationModel>> getUnsyncedNotifications(String bhwId) async {
     final db = await database;
-    await db.update('notifications', {'isRead': 1}, where: 'id = ?', whereArgs: [id]);
+    final maps = await db.rawQuery('''
+      SELECT n.* FROM notifications n JOIN patients p ON p.id = n.patientId
+      WHERE p.assignedBhwId = ? AND p.status != 'Inactive' AND n.isSynced = 0
+    ''', [bhwId]);
+    return maps.map(NotificationModel.fromMap).toList();
+  }
+
+  Future<NotificationModel?> getNotificationById(String id) async {
+    final db = await database;
+    final maps =
+        await db.query('notifications', where: 'id = ?', whereArgs: [id]);
+    return maps.isEmpty ? null : NotificationModel.fromMap(maps.first);
+  }
+
+  Future<void> upsertRemoteNotification(NotificationModel notification) async {
+    final db = await database;
+    final local = await getNotificationById(notification.id);
+    if (local != null && !local.isSynced) return;
+    // Older servers may not have a handled timestamp. Do not lose a known
+    // local one or let an ordinary sync move the midnight cutoff forward.
+    if (notification.handledAt == null &&
+        (notification.isRead || notification.resolved) &&
+        local?.createdAt.isAtSameMomentAs(notification.createdAt) == true) {
+      notification = notification.copyWith(handledAt: local?.handledAt);
+    }
+    await db.insert('notifications', notification.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> markNotificationSynced(String id,
+      {NotificationModel? uploaded}) async {
+    final db = await database;
+    await db.update('notifications', {'isSynced': 1},
+        where: uploaded == null
+            ? 'id = ?'
+            : 'id = ? AND isRead = ? AND resolved = ?',
+        whereArgs: uploaded == null
+            ? [id]
+            : [id, uploaded.isRead ? 1 : 0, uploaded.resolved ? 1 : 0]);
+  }
+
+  Future<void> markNotificationRead(String id, {DateTime? at}) async {
+    final db = await database;
+    await db.update(
+        'notifications',
+        {
+          'isRead': 1,
+          'isSynced': 0,
+          'handledAt': (at ?? DateTime.now()).toIso8601String()
+        },
+        where: 'id = ? AND isRead = 0 AND resolved = 0',
+        whereArgs: [id]);
   }
 
   /// Marks any unread "not visited" alerts for this patient as read. Called
@@ -1030,12 +991,7 @@ class DatabaseHelper {
   /// after the BHW just logged a fresh visit, which would look broken.
   Future<void> resolveNoVisitNotifications(String patientId) async {
     final db = await database;
-    await db.update(
-      'notifications',
-      {'isRead': 1},
-      where: 'patientId = ? AND type = ? AND isRead = 0',
-      whereArgs: [patientId, 'no_visit'],
-    );
+    await _resolveNotifications(db, patientId, 'no_visit');
   }
 
   /// Marks any unread "Highly At Risk" alerts for this patient as read.
@@ -1046,12 +1002,7 @@ class DatabaseHelper {
   /// in the history, it just stops counting as unread.
   Future<void> resolveHighRiskNotifications(String patientId) async {
     final db = await database;
-    await db.update(
-      'notifications',
-      {'isRead': 1},
-      where: 'patientId = ? AND type = ? AND isRead = 0',
-      whereArgs: [patientId, 'high_risk'],
-    );
+    await _resolveNotifications(db, patientId, 'high_risk');
   }
 
   /// Marks high-BP alerts for this patient as read. Called when a corrected
@@ -1059,23 +1010,27 @@ class DatabaseHelper {
   /// list stops showing a stale "high blood pressure" notice.
   Future<void> resolveHighBpNotifications(String patientId) async {
     final db = await database;
-    await db.update(
-      'notifications',
-      {'isRead': 1},
-      where: 'patientId = ? AND type = ? AND isRead = 0',
-      whereArgs: [patientId, 'high_bp'],
+    await _resolveNotifications(db, patientId, 'high_bp');
+  }
+
+  Future<void> _resolveNotifications(
+      Database db, String patientId, String type) async {
+    await db.rawUpdate(
+      'UPDATE notifications SET isRead = 1, resolved = 1, isSynced = 0, handledAt = COALESCE(handledAt, ?) '
+      'WHERE patientId = ? AND type = ? AND resolved = 0',
+      [DateTime.now().toIso8601String(), patientId, type],
     );
   }
 
-  Future<void> markAllNotificationsRead(String bhwId) async {
+  Future<void> markAllNotificationsRead(String bhwId, {DateTime? at}) async {
     final db = await database;
     final patients = await getPatientsByBhw(bhwId);
     final patientIds = patients.map((p) => p.id).toList();
     if (patientIds.isEmpty) return;
     final placeholders = patientIds.map((_) => '?').join(',');
     await db.rawUpdate(
-      'UPDATE notifications SET isRead = 1 WHERE patientId IN ($placeholders)',
-      patientIds,
+      'UPDATE notifications SET isRead = 1, isSynced = 0, handledAt = ? WHERE patientId IN ($placeholders) AND isRead = 0 AND resolved = 0',
+      [(at ?? DateTime.now()).toIso8601String(), ...patientIds],
     );
   }
 

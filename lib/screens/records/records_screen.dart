@@ -324,6 +324,9 @@ class _RecordDetailSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final riskScore = RiskClassifier.calculateRiskScore(record.bloodGlucose);
+    if (!context.watch<AppProvider>().patients.any((patient) => patient.id == record.patientId)) {
+      return const PatientAccessNotice(fullScreen: false);
+    }
 
     return Container(
       decoration: const BoxDecoration(

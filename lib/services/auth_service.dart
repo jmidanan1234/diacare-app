@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:crypto/crypto.dart';
@@ -10,8 +11,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../database/database_helper.dart';
 import '../models/user_model.dart';
 import 'fcm_service.dart';
+import 'local_notification_service.dart';
 
-class AuthService {
+class AuthService extends ChangeNotifier {
   static final AuthService _instance = AuthService._internal();
   factory AuthService() => _instance;
   AuthService._internal();
@@ -74,7 +76,8 @@ class AuthService {
        without a network round trip, and is only given up when the worker
        logs out themselves. */
     if (!online) {
-      lastError = 'No internet connection. Connect to the internet to sign in — '
+      lastError =
+          'No internet connection. Connect to the internet to sign in — '
           'once signed in, you can keep working offline.';
       return false;
     }
@@ -118,8 +121,7 @@ class AuthService {
               final salt = generateSalt();
               final hash = _hashPassword(password, salt);
 
-              final existingLocalUser = await _db.getUserById(uid) ??
-                  await _db.getUserByUsername(normalizedUsername);
+              final existingLocalUser = await _db.getUserById(uid);
 
               cachedUser = UserModel(
                 id: uid,
@@ -142,10 +144,34 @@ class AuthService {
             }
           } catch (_) {}
 
-          cachedUser ??= await _db.getUserById(uid) ??
-              await _db.getUserByUsername(normalizedUsername);
+          cachedUser ??= await _db.getUserById(uid);
+          if (cachedUser == null || cachedUser.id != uid) {
+            // The login response is server-verified for this uid. A cached
+            // username from a deleted/recreated account is not the same user.
+            final profile = body['profile'] as Map<String, dynamic>? ?? {};
+            final parts = (profile['fullName'] as String? ?? '')
+                .trim()
+                .split(RegExp(r'\s+'));
+            final salt = generateSalt();
+            cachedUser = UserModel(
+              id: uid,
+              firstName: parts.first,
+              lastName: parts.skip(1).join(' '),
+              username: normalizedUsername,
+              passwordHash: _hashPassword(password, salt),
+              salt: salt,
+              role: 'bhw',
+              barangay: profile['barangay'] as String? ?? '',
+              purok: profile['purok'] as String? ?? '',
+              isActive: true,
+              mustChangePassword: profile['mustChangePassword'] != false,
+              createdAt: DateTime.now(),
+            );
+            await _db.upsertUser(cachedUser);
+          }
 
           _currentUser = cachedUser;
+          notifyListeners();
           await _persistSession(uid, normalizedUsername);
           // Now that there is a session, the push token has somewhere to
           // be written. At app start there usually is not one.
@@ -163,10 +189,12 @@ class AuthService {
           'Please try again.';
       return false;
     } on TimeoutException {
-      lastError = 'The server did not respond. Check your signal and try again.';
+      lastError =
+          'The server did not respond. Check your signal and try again.';
       return false;
     } catch (e) {
-      lastError = 'Could not reach the server. Check your connection and try again.';
+      lastError =
+          'Could not reach the server. Check your connection and try again.';
       return false;
     }
   }
@@ -177,12 +205,15 @@ class AuthService {
     if (userId == null) return false;
 
     final user = await _db.getUserById(userId);
-    if (user == null || !user.isActive) {
+    if (user == null ||
+        !user.isActive ||
+        (_auth.currentUser != null && _auth.currentUser!.uid != userId)) {
       await prefs.remove(_keyUserId);
       return false;
     }
 
     _currentUser = user;
+    notifyListeners();
     return true;
   }
 
@@ -190,7 +221,9 @@ class AuthService {
     // Before the session goes: a push aimed at this worker must not land
     // on a handset the next person signs into.
     await FCMService().clearToken();
+    await LocalNotificationService().cancelAll();
     _currentUser = null;
+    notifyListeners();
     try {
       await _auth.signOut();
     } catch (_) {}
@@ -240,17 +273,20 @@ class AuthService {
     }
 
     try {
-      final res = await http.post(
-        Uri.parse('$apiBase/api/bhw-change-password'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({
-          'currentPassword': requireCurrentPassword ? currentPassword : null,
-          'newPassword': newPassword,
-        }),
-      ).timeout(const Duration(seconds: 15));
+      final res = await http
+          .post(
+            Uri.parse('$apiBase/api/bhw-change-password'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $token',
+            },
+            body: jsonEncode({
+              'currentPassword':
+                  requireCurrentPassword ? currentPassword : null,
+              'newPassword': newPassword,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
 
       if (res.statusCode != 200) {
         Map<String, dynamic>? body;

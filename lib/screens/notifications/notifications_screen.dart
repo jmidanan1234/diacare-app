@@ -88,6 +88,7 @@ Color get _color =>
       notification.type == 'high_risk' ? Icons.warning_rounded
           : notification.type == 'high_bp' ? Icons.monitor_heart_rounded
           : notification.type == 'flagged' ? Icons.flag_rounded
+          : notification.type == 'at_risk' ? Icons.info_rounded
           : Icons.schedule_rounded;
 
   // "HIGHLY AT RISK" matches the wording used everywhere else in the app.
@@ -95,6 +96,7 @@ Color get _color =>
       notification.type == 'high_risk' ? 'HIGHLY AT RISK'
           : notification.type == 'high_bp' ? 'HIGH BLOOD PRESSURE'
           : notification.type == 'flagged' ? 'FLAGGED FOR FOLLOW-UP'
+          : notification.type == 'at_risk' ? 'AT RISK'
           : 'VISIT OVERDUE';
 
   @override

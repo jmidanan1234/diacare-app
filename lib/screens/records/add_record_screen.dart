@@ -491,6 +491,10 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final assigned = context.watch<AppProvider>().patients;
+    if (_selectedPatient != null && !assigned.any((patient) => patient.id == _selectedPatient!.id)) {
+      return const PatientAccessNotice();
+    }
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
@@ -514,7 +518,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                         children: [
                           _PatientPickerField(
                             selected: _selectedPatient,
-                            patients: widget.patients,
+                            patients: assigned,
                             // A correction always belongs to the same patient.
                             enabled: !_isEdit,
                             onChanged: (p) {

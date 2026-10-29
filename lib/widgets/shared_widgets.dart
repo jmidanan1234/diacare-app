@@ -6,6 +6,25 @@ import '../models/health_record.dart';
 import '../services/risk_classifier.dart';
 import 'package:intl/intl.dart';
 
+class PatientAccessNotice extends StatelessWidget {
+  final bool fullScreen;
+  const PatientAccessNotice({super.key, this.fullScreen = true});
+
+  @override
+  Widget build(BuildContext context) {
+    const message = Padding(
+      padding: EdgeInsets.all(24),
+      child: Center(
+          child: Text('This patient is no longer assigned to your account.')),
+    );
+    return fullScreen
+        ? Scaffold(
+            appBar: AppBar(title: const Text('Patient unavailable')),
+            body: message)
+        : message;
+  }
+}
+
 class RiskBadge extends StatelessWidget {
   final String riskLevel;
   final bool compact;
@@ -110,50 +129,54 @@ class SummaryCard extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 6, 14, 12),
+            padding: const EdgeInsets.all(12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Container(
-                  padding: const EdgeInsets.all(7),
-                  decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(icon, color: color, size: 16),
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(7),
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(icon, color: color, size: 18),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            value,
+                            style: TextStyle(
+                              fontSize: 29,
+                              fontWeight: FontWeight.w800,
+                              color: color,
+                              height: 1.1,
+                              letterSpacing: -0.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 8),
-                // No stripe or border for identity — the number itself
-                // carries the card's color, and the icon badge above it
-                // repeats that same color, so the two together read as one
-                // deliberate accent instead of a decorative bar.
-                SizedBox(
-                  width: double.infinity,
-                  child: Text(
-                    value,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 23,
-                      fontWeight: FontWeight.w800,
-                      color: color,
-                      height: 1.0,
-                      letterSpacing: -0.5,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 3),
                 SizedBox(
                   width: double.infinity,
                   child: Text(
                     title,
-                    textAlign: TextAlign.center,
+                    textAlign: TextAlign.left,
                     style: const TextStyle(
-                      fontSize: 11,
+                      fontSize: 13,
                       color: AppColors.textSecondary,
-                      fontWeight: FontWeight.w500,
-                      height: 1.15,
+                      fontWeight: FontWeight.w600,
+                      height: 1.2,
                     ),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
@@ -294,6 +317,17 @@ class HealthRecordCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final medicationStatus = record.medAdherence == AppConstants.medTaken
+        ? 'Taken'
+        : record.medAdherence == AppConstants.medPartial
+            ? 'Partial'
+            : 'Missed';
+    final medicationStatusColor = record.medAdherence == AppConstants.medTaken
+        ? AppColors.success
+        : record.medAdherence == AppConstants.medPartial
+            ? AppColors.warning
+            : AppColors.error;
+
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
@@ -344,14 +378,16 @@ class HealthRecordCard extends StatelessWidget {
                   RiskBadge(
                     riskLevel: record.riskLevel,
                     compact: true,
-                    score: RiskClassifier.calculateRiskScore(record.bloodGlucose),
+                    score:
+                        RiskClassifier.calculateRiskScore(record.bloodGlucose),
                   ),
                 ],
               ),
               const SizedBox(height: 8),
               Row(
                 children: [
-                  const Icon(Icons.schedule_rounded, size: 12, color: AppColors.textSecondary),
+                  const Icon(Icons.schedule_rounded,
+                      size: 12, color: AppColors.textSecondary),
                   const SizedBox(width: 4),
                   Expanded(
                     child: Text(
@@ -374,7 +410,8 @@ class HealthRecordCard extends StatelessWidget {
                   Expanded(
                     child: Row(
                       children: [
-                        const Icon(Icons.schedule_rounded, size: 12, color: AppColors.textSecondary),
+                        const Icon(Icons.schedule_rounded,
+                            size: 12, color: AppColors.textSecondary),
                         const SizedBox(width: 4),
                         Expanded(
                           // Shrinks slightly when space is tight instead of
@@ -383,7 +420,8 @@ class HealthRecordCard extends StatelessWidget {
                             fit: BoxFit.scaleDown,
                             alignment: Alignment.centerLeft,
                             child: Text(
-                              DateFormat('MMM d, y • h:mm a').format(record.visitDate),
+                              DateFormat('MMM d, y • h:mm a')
+                                  .format(record.visitDate),
                               maxLines: 1,
                               softWrap: false,
                               style: const TextStyle(
@@ -401,7 +439,8 @@ class HealthRecordCard extends StatelessWidget {
                   RiskBadge(
                     riskLevel: record.riskLevel,
                     compact: true,
-                    score: RiskClassifier.calculateRiskScore(record.bloodGlucose),
+                    score:
+                        RiskClassifier.calculateRiskScore(record.bloodGlucose),
                   ),
                 ],
               ),
@@ -416,11 +455,15 @@ class HealthRecordCard extends StatelessWidget {
                 child: const Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.cloud_off_rounded, size: 12, color: AppColors.warning),
+                    Icon(Icons.cloud_off_rounded,
+                        size: 12, color: AppColors.warning),
                     SizedBox(width: 4),
                     Text(
                       'Not synced',
-                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.warning),
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.warning),
                     ),
                   ],
                 ),
@@ -430,13 +473,15 @@ class HealthRecordCard extends StatelessWidget {
             const Divider(height: 1),
             const SizedBox(height: 12),
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
                   child: _Metric(
-                    expand: true,
+                    singleLine: true,
                     icon: Icons.water_drop_rounded,
                     label: 'Glucose',
-                    value: (record.bloodGlucose != null && record.bloodGlucose! > 0)
+                    value: (record.bloodGlucose != null &&
+                            record.bloodGlucose! > 0)
                         ? '${record.bloodGlucose!.toStringAsFixed(0)} mg/dL'
                         : '—',
                   ),
@@ -444,7 +489,7 @@ class HealthRecordCard extends StatelessWidget {
                 const SizedBox(width: 6),
                 Expanded(
                   child: _Metric(
-                    expand: true,
+                    singleLine: true,
                     icon: Icons.monitor_heart_rounded,
                     label: 'BP',
                     value: record.bloodPressure != '—'
@@ -455,7 +500,7 @@ class HealthRecordCard extends StatelessWidget {
                 const SizedBox(width: 6),
                 Expanded(
                   child: _Metric(
-                    expand: true,
+                    singleLine: true,
                     icon: Icons.straighten_rounded,
                     label: 'BMI',
                     value: (record.bmi != null && record.bmi! > 0)
@@ -463,68 +508,46 @@ class HealthRecordCard extends StatelessWidget {
                         : '—',
                   ),
                 ),
-                const SizedBox(width: 6),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Divider(height: 1),
+            const SizedBox(height: 12),
+            Row(
+              children: [
                 Expanded(
                   child: _Metric(
-                    expand: true,
-                    icon: Icons.medication_rounded,
+                    icon: Icons.medical_information_rounded,
                     label: 'Medication',
-                    value: record.medAdherence == AppConstants.medTaken
-                        ? 'Taken'
-                        : record.medAdherence == AppConstants.medPartial
-                            ? 'Partial'
-                            : 'Missed',
-                    valueColor: record.medAdherence == AppConstants.medTaken
-                        ? AppColors.success
-                        : record.medAdherence == AppConstants.medPartial
-                            ? AppColors.warning
-                            : AppColors.error,
+                    value: record.medicationName != null &&
+                            record.medicationName!.isNotEmpty
+                        ? (record.dosage != null && record.dosage!.isNotEmpty
+                            ? '${record.medicationName} • ${record.dosage}'
+                            : record.medicationName!)
+                        : '—',
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: medicationStatusColor.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    medicationStatus,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: medicationStatusColor,
+                    ),
                   ),
                 ),
               ],
             ),
-            if ((record.medicationName != null && record.medicationName!.isNotEmpty) ||
-                record.insulinUse) ...[
-              const SizedBox(height: 12),
-              const Divider(height: 1),
-              const SizedBox(height: 12),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (record.medicationName != null && record.medicationName!.isNotEmpty)
-                    Expanded(
-                      child: _Metric(
-                        icon: Icons.medical_information_rounded,
-                        label: 'Medication',
-                        value: record.dosage != null && record.dosage!.isNotEmpty
-                            ? '${record.medicationName} • ${record.dosage}'
-                            : record.medicationName!,
-                      ),
-                    ),
-                  if (record.insulinUse)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: AppColors.primarySoft,
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.vaccines_rounded, size: 12, color: AppColors.primary),
-                          SizedBox(width: 4),
-                          Text(
-                            'Insulin',
-                            style: TextStyle(
-                                fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.primary),
-                          ),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
-            ],
-            if (record.observations != null && record.observations!.isNotEmpty) ...[
+            if (record.observations != null &&
+                record.observations!.isNotEmpty) ...[
               const SizedBox(height: 12),
               Container(
                 padding: const EdgeInsets.all(10),
@@ -535,12 +558,14 @@ class HealthRecordCard extends StatelessWidget {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Icon(Icons.notes, size: 14, color: AppColors.textSecondary),
+                    const Icon(Icons.notes,
+                        size: 14, color: AppColors.textSecondary),
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
                         record.observations!,
-                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                        style: const TextStyle(
+                            fontSize: 12, color: AppColors.textSecondary),
                       ),
                     ),
                   ],
@@ -557,20 +582,15 @@ class HealthRecordCard extends StatelessWidget {
 class _Metric extends StatelessWidget {
   final String label;
   final String value;
-  final Color? valueColor;
   final IconData? icon;
 
-  /// true (default): fills an equal share of the row, as before.
-  /// false: only as wide as its own text, so a row of these can be spread
-  /// with equal visible gaps between them.
-  final bool expand;
+  final bool singleLine;
 
   const _Metric({
     required this.label,
     required this.value,
-    this.valueColor,
     this.icon,
-    this.expand = true,
+    this.singleLine = false,
   });
 
   @override
@@ -584,31 +604,38 @@ class _Metric extends StatelessWidget {
         maxLines: 1,
       ),
     );
-    final content = Column(
+    final valueText = Text(
+      value,
+      maxLines: singleLine ? 1 : null,
+      softWrap: !singleLine,
+      style: const TextStyle(
+        fontSize: 13,
+        fontWeight: FontWeight.w600,
+        color: AppColors.textPrimary,
+      ),
+    );
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
-          mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
           children: [
             if (icon != null) ...[
               Icon(icon, size: 11, color: AppColors.textMuted),
               const SizedBox(width: 3),
             ],
-            if (expand) Expanded(child: labelText) else labelText,
+            Expanded(child: labelText),
           ],
         ),
         const SizedBox(height: 2),
-        Text(
-          value,
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w600,
-            color: valueColor ?? AppColors.textPrimary,
-          ),
-        ),
+        if (singleLine)
+          FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: valueText)
+        else
+          valueText,
       ],
     );
-    return expand ? Expanded(child: content) : content;
   }
 }
 

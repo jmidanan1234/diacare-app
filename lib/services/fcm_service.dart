@@ -3,6 +3,18 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'local_notification_service.dart';
+import '../database/database_helper.dart';
+import '../firebase_options.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+@pragma('vm:entry-point')
+Future<void> handleBhwBackgroundMessage(RemoteMessage message) async {
+  if (Firebase.apps.isEmpty) {
+    await Firebase.initializeApp(
+        options: DefaultFirebaseOptions.currentPlatform);
+  }
+  await FCMService.showAssignedMessage(message);
+}
 
 /// Handles Firebase Cloud Messaging registration and incoming push
 /// notifications from the (future) backend — e.g. a BHN flagging a record
@@ -48,7 +60,9 @@ class FCMService {
       }
 
       _messaging = FirebaseMessaging.instance;
-      await _messaging!.requestPermission(alert: true, badge: true, sound: true);
+      FirebaseMessaging.onBackgroundMessage(handleBhwBackgroundMessage);
+      await _messaging!
+          .requestPermission(alert: true, badge: true, sound: true);
 
       _token = await _messaging!.getToken();
       await registerToken();
@@ -62,26 +76,83 @@ class FCMService {
       // automatically while the app is open, so route it through the same
       // local-notification presentation used for on-device alerts, for a
       // consistent look regardless of which channel triggered it.
-      FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-        final notification = message.notification;
-        if (notification == null) return;
-        final type = message.data['type'];
-        if (type == 'high_risk') {
-          LocalNotificationService().showHighRiskAlert(
-            patientName: message.data['patientName'] ?? '',
-            message: notification.body ?? '',
-          );
-        } else {
-          LocalNotificationService().showNoVisitAlert(
-            patientName: message.data['patientName'] ?? '',
-            message: notification.body ?? '',
-          );
-        }
-      });
+      FirebaseMessaging.onMessage.listen(showAssignedMessage);
     } catch (_) {
       // Push is a convenience on top of the on-device alerts. If the
       // device refuses permission, or there is no network at start-up,
       // the rest of the app must carry on working exactly as before.
+    }
+  }
+
+  /// Validate the signed-in worker and current server assignment. A delayed
+  /// message for a previous user or previous assignment is silently discarded.
+  static Future<void> showAssignedMessage(RemoteMessage message) async {
+    try {
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      final patientId = message.data['patientId'];
+      final preferences = await SharedPreferences.getInstance();
+      if (uid == null ||
+          message.data['bhwId'] != uid ||
+          patientId == null ||
+          preferences.getString('current_user_id') != uid) {
+        return;
+      }
+      final patient = await FirebaseFirestore.instance
+          .collection('patients')
+          .doc(patientId)
+          .get(const GetOptions(source: Source.server));
+      if (!patient.exists ||
+          patient.data()?['assignedBhwId'] != uid ||
+          FirebaseAuth.instance.currentUser?.uid != uid) {
+        return;
+      }
+      final service = LocalNotificationService();
+      final alertId = message.data['alertId'];
+      if (alertId == null || alertId.isEmpty) return;
+      final alert = await FirebaseFirestore.instance
+          .collection('alerts')
+          .doc(alertId)
+          .get(const GetOptions(source: Source.server));
+      final data = alert.data();
+      if (!alert.exists ||
+          data?['patientId'] != patientId ||
+          data?['assignedBhwId'] != uid ||
+          FirebaseAuth.instance.currentUser?.uid != uid) {
+        return;
+      }
+      if (data?['acknowledged'] == true || data?['resolved'] == true) {
+        await service.cancelAlert(alertId);
+        return;
+      }
+      final raisedAt = data?['raisedAt'];
+      final local = await DatabaseHelper().getNotificationById(alertId);
+      if (local != null &&
+          (local.isRead || local.resolved) &&
+          raisedAt is Timestamp &&
+          local.createdAt.millisecondsSinceEpoch ==
+              raisedAt.millisecondsSinceEpoch) {
+        await service.cancelAlert(alertId);
+        return;
+      }
+      final sentAt = message.data['alertRaisedAt'];
+      if (sentAt != null &&
+          sentAt.isNotEmpty &&
+          raisedAt is Timestamp &&
+          sentAt != raisedAt.millisecondsSinceEpoch.toString()) {
+        return;
+      }
+      final name = message.data['patientName'] ?? '';
+      final body = message.data['body'] ?? message.notification?.body ?? '';
+      if (FirebaseAuth.instance.currentUser?.uid != uid) return;
+      if (message.data['type'] == 'no_visit') {
+        await service.showNoVisitAlert(
+            patientName: name, message: body, alertId: alertId);
+      } else {
+        await service.showHighRiskAlert(
+            patientName: name, message: body, alertId: alertId);
+      }
+    } catch (_) {
+      // The durable alert remains available on the next successful sync.
     }
   }
 
