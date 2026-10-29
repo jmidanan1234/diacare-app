@@ -234,14 +234,15 @@ class _RecordListItem extends StatelessWidget {
           onTap: onTap,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Name and visit timestamp
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
+                // Keep the sync badge at the opposite edge of the name row.
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Text(
                         patientName,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -251,54 +252,56 @@ class _RecordListItem extends StatelessWidget {
                           color: AppColors.textPrimary,
                         ),
                       ),
-                      const SizedBox(height: 3),
-                      Row(
-                        children: [
-                          const Icon(Icons.schedule_rounded, size: 12, color: AppColors.textSecondary),
-                          const SizedBox(width: 4),
-                          Text(
-                            DateFormat('h:mm a').format(record.visitDate),
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                              color: AppColors.textSecondary,
-                            ),
-                          ),
-                          if (!record.isSynced) ...[
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: AppColors.warning.withValues(alpha: 0.12),
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: const Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.cloud_off_rounded, size: 10, color: AppColors.warning),
-                                  SizedBox(width: 3),
-                                  Text(
-                                    'Not synced',
-                                    style: TextStyle(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w700,
-                                      color: AppColors.warning,
-                                    ),
-                                  ),
-                                ],
+                    ),
+                    if (!record.isSynced) ...[
+                      const SizedBox(width: 12),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: AppColors.warning.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.cloud_off_rounded, size: 10, color: AppColors.warning),
+                            SizedBox(width: 3),
+                            Text(
+                              'Not synced',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.warning,
                               ),
                             ),
                           ],
-                        ],
+                        ),
                       ),
                     ],
-                  ),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                const Icon(
-                  Icons.chevron_right_rounded,
-                  size: 20,
-                  color: AppColors.textMuted,
+                const SizedBox(height: 3),
+                Row(
+                  children: [
+                    const Icon(Icons.schedule_rounded, size: 12, color: AppColors.textSecondary),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        DateFormat('h:mm a').format(record.visitDate),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: AppColors.textSecondary,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Icon(
+                      Icons.chevron_right_rounded,
+                      size: 20,
+                      color: AppColors.textMuted,
+                    ),
+                  ],
                 ),
               ],
             ),

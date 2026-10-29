@@ -873,17 +873,15 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                       border: Border.all(
                           color: AppColors.highRisk.withValues(alpha: 0.3)),
                     ),
-                    child: Row(
+                    child: const Row(
                       children: [
-                        const Icon(Icons.warning_amber_rounded,
+                        Icon(Icons.warning_amber_rounded,
                             color: AppColors.highRisk, size: 18),
-                        const SizedBox(width: 8),
+                        SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            _isEdit
-                                ? 'This visit is Highly At Risk. Please refer the patient to the RHU if needed.'
-                                : 'This patient will be flagged Highly At Risk. An alert notification will be created.',
-                            style: const TextStyle(
+                            'Please inform the BHN today.',
+                            style: TextStyle(
                                 fontSize: 12, color: AppColors.highRisk),
                           ),
                         ),
@@ -1143,7 +1141,7 @@ class _RiskResultDialog extends StatelessWidget {
   String get _message {
     switch (riskLevel) {
       case AppConstants.riskHigh:
-        return 'Patient needs immediate follow-up. Please refer the patient to the RHU if needed.';
+        return 'Please inform the BHN today.';
       case AppConstants.riskModerate:
         return 'Patient is At Risk. Increased monitoring is recommended.';
       default:

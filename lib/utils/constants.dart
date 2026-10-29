@@ -1,6 +1,6 @@
 class AppConstants {
   static const String appName = 'DiaCare';
-  static const String appVersion = '1.0.11';
+  static const String appVersion = '1.0.12';
   static const String appTagline = 'Barangay Diabetes Monitoring';
   static const String disclaimer =
       'DiaCare is designed for community health monitoring and decision-support only. It does not provide medical diagnosis or treatment.';
