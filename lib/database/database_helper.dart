@@ -7,6 +7,7 @@ import '../models/notification_model.dart';
 import '../models/sync_log.dart';
 import '../utils/constants.dart';
 import '../utils/clinical_reset.dart';
+import '../utils/patient_identity.dart';
 import '../services/local_notification_service.dart';
 
 class DatabaseHelper {
@@ -672,15 +673,114 @@ class DatabaseHelper {
     );
   }
 
-  Future<bool> isDuplicatePatient(String firstName, String lastName,
-      DateTime birthDate, String excludeId) async {
+  /// The patient already on this phone that [identity] would duplicate, or
+  /// null. Needs no connection, so it holds in a barangay with no signal.
+  ///
+  /// Every local row is considered: a patient the RHU marked inactive or
+  /// moved to another worker is still the same person, and registering
+  /// them again is exactly the duplicate this exists to stop. Matching is
+  /// done here rather than in SQL because SQLite's lower() only folds
+  /// ASCII, which would miss "PEÑA" against "Peña".
+  Future<Patient?> findDuplicatePatient(PatientIdentity identity,
+      {String? excludeId}) async {
     final db = await database;
-    final maps = await db.query(
-      'patients',
-      where: "firstName = ? AND lastName = ? AND birthDate = ? AND id != ?",
-      whereArgs: [firstName, lastName, birthDate.toIso8601String(), excludeId],
-    );
-    return maps.isNotEmpty;
+    final rows = await db.query('patients', orderBy: 'createdAt ASC');
+    for (final row in rows) {
+      final candidate = Patient.fromMap(row);
+      if (candidate.id == excludeId) continue;
+      if (identity.matches(PatientIdentity.of(candidate))) return candidate;
+    }
+    return null;
+  }
+
+  /// Folds registrations this worker made offline into the record of the
+  /// same person that is already assigned to them, and returns how many
+  /// were folded.
+  ///
+  /// The form check only sees what is on the phone. A patient the RHU
+  /// encoded and assigned to this worker while they were out of signal is
+  /// not on the phone yet, so the worker can register them a second time
+  /// in good faith. Sync pulls the RHU's copy down first and calls this
+  /// before uploading anything, so the second registration never reaches
+  /// the server: its visits and alerts move to the existing record and
+  /// upload under it, and the duplicate row is removed.
+  ///
+  /// Only rows the server has never seen (remoteKnown = 0) are folded
+  /// away. A copy the server already has always survives; between two
+  /// offline copies the earlier registration survives. Inactive patients
+  /// are never a target, since folding into one would hide the visits.
+  Future<int> mergeOfflineDuplicates(String bhwId) async {
+    final db = await database;
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'patients',
+        where: "assignedBhwId = ? AND status != 'Inactive'",
+        whereArgs: [bhwId],
+        orderBy: 'createdAt ASC',
+      );
+      final entries = rows
+          .map((row) => (
+                patient: Patient.fromMap(row),
+                onServer: row['remoteKnown'] == 1,
+              ))
+          .toList();
+
+      final removed = <String>{};
+      var merged = 0;
+      for (final candidate in entries) {
+        if (candidate.onServer || removed.contains(candidate.patient.id)) {
+          continue;
+        }
+        final identity = PatientIdentity.of(candidate.patient);
+        final matches = entries
+            .where((other) =>
+                other.patient.id != candidate.patient.id &&
+                !removed.contains(other.patient.id) &&
+                identity.matches(PatientIdentity.of(other.patient)))
+            .toList()
+          ..sort((a, b) {
+            if (a.onServer != b.onServer) return a.onServer ? -1 : 1;
+            return a.patient.createdAt.compareTo(b.patient.createdAt);
+          });
+        if (matches.isEmpty) continue;
+
+        final target = matches.first;
+        // Two offline copies: the later one is folded into the earlier one
+        // when its own turn comes, so the earlier one is left alone here.
+        if (!target.onServer &&
+            target.patient.createdAt.isAfter(candidate.patient.createdAt)) {
+          continue;
+        }
+
+        final from = candidate.patient.id;
+        final into = target.patient.id;
+        await txn.update('health_records', {'patientId': into},
+            where: 'patientId = ?', whereArgs: [from]);
+        await txn.update(
+            'notifications',
+            {'patientId': into, 'patientName': target.patient.fullName},
+            where: 'patientId = ?',
+            whereArgs: [from]);
+        await txn.delete('patients', where: 'id = ?', whereArgs: [from]);
+
+        // The surviving record's label follows its latest classified visit,
+        // which may be one of the visits that just moved over.
+        await txn.rawUpdate('''
+          UPDATE patients
+          SET riskLevel = COALESCE((
+                SELECT r.riskLevel FROM health_records r
+                WHERE r.patientId = patients.id AND r.riskLevel != ''
+                ORDER BY r.visitDate DESC
+                LIMIT 1
+              ), riskLevel)
+          WHERE id = ?
+        ''', [into]);
+
+        removed.add(from);
+        merged++;
+      }
+      return merged;
+    });
   }
 
   // ==================== HEALTH RECORDS ====================

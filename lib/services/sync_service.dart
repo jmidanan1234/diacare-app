@@ -12,6 +12,7 @@ import '../models/notification_model.dart';
 import '../models/patient.dart';
 import '../models/sync_log.dart';
 import '../utils/constants.dart';
+import '../utils/patient_identity.dart';
 
 class SyncResult {
   final bool success;
@@ -180,6 +181,13 @@ class SyncService {
       // Fetch current assignments from the server before uploading cached work.
       // A former worker must never reclaim a reassigned patient during sync.
       final receivedBefore = await _pullFromFirestore(uid);
+
+      // With the RHU's copy of every assigned patient now on the phone, a
+      // patient registered here while offline who turns out to be one of
+      // them is folded into that record before anything is uploaded, so
+      // the second registration never reaches the server.
+      final mergedDuplicates = await _db.mergeOfflineDuplicates(uid);
+
       final unsyncedPatients = await _db.getUnsyncedPatients(uid);
       final unsyncedRecords = await _db.getUnsyncedRecords(uid);
       final unsyncedAlerts = await _db.getUnsyncedNotifications(uid);
@@ -427,7 +435,12 @@ class SyncService {
       }
 
       final String pulledNote =
-          pulled > 0 ? ' Received $pulled updates from the RHU.' : '';
+          (pulled > 0 ? ' Received $pulled updates from the RHU.' : '') +
+              (mergedDuplicates > 0
+                  ? ' $mergedDuplicates duplicate registration'
+                      '${mergedDuplicates == 1 ? ' was' : 's were'} merged '
+                      'into the existing patient record.'
+                  : '');
 
       final String message;
       if (deactivated) {
@@ -776,45 +789,45 @@ class SyncService {
     return documents;
   }
 
-  /// Looks for a duplicate among this worker's assigned patients. Other
-  /// workers' registrations are private and cannot be queried by this phone.
+  /// Looks for a duplicate among this worker's assigned patients on the
+  /// server. Other workers' registrations are private and cannot be
+  /// queried by this phone.
   ///
-  /// The local check only sees this worker's own SQLite, so two BHWs
-  /// covering neighbouring puroks could each register the same person and
-  /// neither would be warned — the RHU then has one patient in two rows,
-  /// with half the readings under each.
+  /// The local check covers everything already on the phone; this one
+  /// catches a patient the RHU has assigned to this worker since their
+  /// last sync. Same matching rule as the local check (PatientIdentity),
+  /// so the comparison is done here rather than with Firestore equality
+  /// filters, which are case-sensitive.
   ///
   /// Returns the name of the worker who already has them, an empty string
   /// if the match is unassigned, or null for no match. Offline, or on any
-  /// error, returns null: this is a warning, not a gate, and it must
-  /// never block a registration in a barangay with no signal.
-  Future<String?> findRemoteDuplicate({
-    required String firstName,
-    required String lastName,
-    required DateTime birthDate,
-  }) async {
+  /// error, returns null so a registration in a barangay with no signal is
+  /// never held up — the sync-time merge (mergeOfflineDuplicates) covers
+  /// that case once the phone reconnects.
+  Future<String?> findRemoteDuplicate(PatientIdentity identity,
+      {String? excludeId}) async {
     if (!await isOnline) return null;
     if (_auth.currentUser == null) return null;
     try {
       final snap = await _firestore
           .collection('patients')
           .where('assignedBhwId', isEqualTo: _auth.currentUser!.uid)
-          .where('firstName', isEqualTo: firstName)
-          .where('lastName', isEqualTo: lastName)
           .get()
           .timeout(const Duration(seconds: 8));
 
       for (final doc in snap.docs) {
+        if (doc.id == excludeId) continue;
         final data = doc.data();
-        if ((data['status'] as String? ?? '').toLowerCase() == 'inactive') {
-          continue;
-        }
+        if (data['isArchived'] == true) continue;
         final remoteBirth = _asDate(data['birthDate']);
         if (remoteBirth == null) continue;
-        final sameDay = remoteBirth.year == birthDate.year &&
-            remoteBirth.month == birthDate.month &&
-            remoteBirth.day == birthDate.day;
-        if (!sameDay) continue;
+        final remote = PatientIdentity(
+          firstName: data['firstName'] as String? ?? '',
+          lastName: data['lastName'] as String? ?? '',
+          middleName: data['middleName'] as String?,
+          birthDate: remoteBirth,
+        );
+        if (!identity.matches(remote)) continue;
 
         final otherId = data['assignedBhwId'] as String? ?? '';
         if (otherId.isEmpty) return '';

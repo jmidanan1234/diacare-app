@@ -6,6 +6,7 @@ import '../../providers/app_provider.dart';
 import '../../models/patient.dart';
 import '../../utils/theme.dart';
 import '../../utils/constants.dart';
+import '../../utils/patient_identity.dart';
 import '../../widgets/shared_widgets.dart';
 import '../../widgets/compact_dropdown_field.dart';
 
@@ -162,7 +163,103 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
     });
   }
 
+  /// Where the existing record is, in words the worker can act on.
+  String _describeExisting(Patient existing, String? currentUserId) {
+    if (existing.status == 'Inactive') {
+      return 'is already on record, but was marked inactive by the RHU. '
+          'Ask the RHU to reactivate them instead of registering them again.';
+    }
+    if (existing.assignedBhwId != currentUserId) {
+      return 'is already registered and is now assigned to another health '
+          'worker.';
+    }
+    final place = [
+      if (existing.purok.trim().isNotEmpty) existing.purok.trim(),
+      if (existing.barangay.trim().isNotEmpty) existing.barangay.trim(),
+    ].join(', ');
+    return place.isEmpty
+        ? 'is already on your patient list.'
+        : 'is already on your patient list ($place).';
+  }
+
+  Future<void> _showDuplicate(String name, DateTime birthDate, String where) {
+    return showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Patient Already Registered'),
+        content: Text(
+          '$name, born ${DateFormat('MMMM d, y').format(birthDate)}, $where\n\n'
+          'A patient can only be registered once. Open their existing '
+          'record to add a visit instead.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Refuses a registration (or an edit) that would give one person two
+  /// records. Returns true when it is safe to save.
+  ///
+  /// The local check needs no signal, so this holds offline. The server
+  /// check only runs online and only adds what the phone has not pulled
+  /// yet; anything registered offline is checked again at sync, where a
+  /// duplicate is merged into the existing record instead of uploaded.
+  Future<bool> _passesDuplicateCheck(AppProvider provider) async {
+    final middle = _middleNameController.text.trim();
+    final identity = PatientIdentity(
+      firstName: _firstNameController.text.trim(),
+      lastName: _lastNameController.text.trim(),
+      middleName: middle.isEmpty ? null : middle,
+      birthDate: _birthDate!,
+    );
+
+    // Editing a detail other than name or birth date cannot create a
+    // duplicate, and must not be blocked by one that already exists.
+    final existing = widget.existingPatient;
+    if (existing != null &&
+        PatientIdentity.of(existing).matches(identity)) {
+      return true;
+    }
+
+    final local =
+        await provider.findDuplicate(identity, excludeId: existing?.id);
+    if (!mounted) return false;
+    if (local != null) {
+      setState(() => _isLoading = false);
+      await _showDuplicate(local.fullName, local.birthDate,
+          _describeExisting(local, provider.currentUser?.id));
+      return false;
+    }
+
+    final registeredBy =
+        await provider.findRemoteDuplicate(identity, excludeId: existing?.id);
+    if (!mounted) return false;
+    if (registeredBy != null) {
+      setState(() => _isLoading = false);
+      final name = [identity.firstName, if (middle.isNotEmpty) middle,
+          identity.lastName].join(' ');
+      await _showDuplicate(
+        name,
+        identity.birthDate,
+        registeredBy.isEmpty
+            ? 'is already on the RHU register.'
+            : 'is already registered by $registeredBy.',
+      );
+      return false;
+    }
+    return true;
+  }
+
   Future<void> _submit() async {
+    // A second tap that lands before the button rebuilds as disabled must
+    // not run the save twice and register the same person twice.
+    if (_isLoading) return;
+
     final formValid = _formKey.currentState!.validate();
     final birthMissing = _birthDate == null;
 
@@ -176,6 +273,9 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
     setState(() => _isLoading = true);
 
     final provider = context.read<AppProvider>();
+
+    if (!await _passesDuplicateCheck(provider)) return;
+    if (!mounted) return;
 
     if (widget.isEditing) {
       // Update existing patient
@@ -213,80 +313,6 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
 
     // Add new patient logic
     final id = provider.newPatientId();
-
-    // Duplicate check
-    final isDuplicate = await provider.checkDuplicate(
-      _firstNameController.text.trim(),
-      _lastNameController.text.trim(),
-      _birthDate!,
-      id,
-    );
-
-    if (isDuplicate && mounted) {
-      setState(() => _isLoading = false);
-      showDialog(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: const Text('Duplicate Patient'),
-          content: const Text(
-            'A patient with the same name and date of birth already exists in the system.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('OK'),
-            ),
-          ],
-        ),
-      );
-      return;
-    }
-
-    /* The check above only sees this phone. Someone covering the next
-       purok may already have this patient, and neither worker would ever
-       find out — the RHU ends up with one person in two rows and half
-       their readings under each. Online only, and a warning rather than
-       a block: the same person really can be registered twice for good
-       reasons, and a barangay with no signal must still be able to
-       register anyone. */
-    final registeredBy = await provider.checkRemoteDuplicate(
-      _firstNameController.text.trim(),
-      _lastNameController.text.trim(),
-      _birthDate!,
-    );
-
-    if (registeredBy != null && mounted) {
-      setState(() => _isLoading = false);
-      final who = registeredBy.isEmpty
-          ? 'is already on the RHU register'
-          : 'is already registered by $registeredBy';
-      final proceed = await showDialog<bool>(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: const Text('Already Registered?'),
-          content: Text(
-            'A patient with this name and date of birth $who.\n\n'
-            'Registering them again creates a second record, splitting '
-            'their readings across both. Continue only if this is a '
-            'different person.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Register Anyway'),
-            ),
-          ],
-        ),
-      );
-      if (proceed != true) return;
-      if (!mounted) return;
-      setState(() => _isLoading = true);
-    }
-
     final now = DateTime.now();
     final patient = Patient(
       id: id,

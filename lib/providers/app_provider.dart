@@ -13,6 +13,7 @@ import '../services/sync_service.dart';
 import '../services/local_notification_service.dart';
 import '../utils/constants.dart';
 import '../utils/alert_schedule.dart';
+import '../utils/patient_identity.dart';
 
 class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
   AppProvider() {
@@ -632,21 +633,18 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
     await loadAll();
   }
 
-  Future<bool> checkDuplicate(String firstName, String lastName,
-      DateTime birthDate, String excludeId) async {
-    return await _db.isDuplicatePatient(
-        firstName, lastName, birthDate, excludeId);
+  /// The patient on this phone that [identity] would duplicate, or null.
+  /// Works offline; see DatabaseHelper.findDuplicatePatient.
+  Future<Patient?> findDuplicate(PatientIdentity identity,
+      {String? excludeId}) {
+    return _db.findDuplicatePatient(identity, excludeId: excludeId);
   }
 
   /// Whoever already has this patient on the shared register, or null.
   /// Only reachable online; see SyncService.findRemoteDuplicate.
-  Future<String?> checkRemoteDuplicate(
-      String firstName, String lastName, DateTime birthDate) {
-    return _sync.findRemoteDuplicate(
-      firstName: firstName,
-      lastName: lastName,
-      birthDate: birthDate,
-    );
+  Future<String?> findRemoteDuplicate(PatientIdentity identity,
+      {String? excludeId}) {
+    return _sync.findRemoteDuplicate(identity, excludeId: excludeId);
   }
 
   Future<void> markNotificationRead(String id) async {
