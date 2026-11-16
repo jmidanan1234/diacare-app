@@ -10,6 +10,7 @@ import '../models/sync_log.dart';
 import '../services/auth_service.dart';
 import '../services/risk_classifier.dart';
 import '../services/sync_service.dart';
+import '../services/register_check_service.dart';
 import '../services/local_notification_service.dart';
 import '../utils/constants.dart';
 import '../utils/alert_schedule.dart';
@@ -640,9 +641,9 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
     return _db.findDuplicatePatient(identity, excludeId: excludeId);
   }
 
-  /// Whoever already has this patient on the shared register, or null.
+  /// The record already on the RHU register under this name, or null.
   /// Only reachable online; see SyncService.findRemoteDuplicate.
-  Future<String?> findRemoteDuplicate(PatientIdentity identity,
+  Future<RegisterMatch?> findRemoteDuplicate(PatientIdentity identity,
       {String? excludeId}) {
     return _sync.findRemoteDuplicate(identity, excludeId: excludeId);
   }

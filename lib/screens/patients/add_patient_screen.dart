@@ -182,15 +182,16 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
         : 'is already on your patient list ($place).';
   }
 
-  Future<void> _showDuplicate(String name, DateTime birthDate, String where) {
+  Future<void> _showDuplicate(String name, String where) {
     return showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Patient Already Registered'),
         content: Text(
-          '$name, born ${DateFormat('MMMM d, y').format(birthDate)}, $where\n\n'
-          'A patient can only be registered once. Open their existing '
-          'record to add a visit instead.',
+          '$name $where\n\n'
+          'A patient with the same first name and surname can only be '
+          'registered once, even in a different purok or barangay. Open '
+          'their existing record to add a visit instead.',
         ),
         actions: [
           TextButton(
@@ -205,21 +206,22 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
   /// Refuses a registration (or an edit) that would give one person two
   /// records. Returns true when it is safe to save.
   ///
+  /// Only the first name and surname are compared: the same two names in
+  /// another purok or barangay are still the same person.
+  ///
   /// The local check needs no signal, so this holds offline. The server
-  /// check only runs online and only adds what the phone has not pulled
-  /// yet; anything registered offline is checked again at sync, where a
-  /// duplicate is merged into the existing record instead of uploaded.
+  /// check only runs online and covers the whole RHU register, including
+  /// patients encoded on the dashboard or held by other workers; anything
+  /// registered offline is checked again at sync, where a duplicate is
+  /// merged into the existing record or held back instead of uploaded.
   Future<bool> _passesDuplicateCheck(AppProvider provider) async {
-    final middle = _middleNameController.text.trim();
     final identity = PatientIdentity(
       firstName: _firstNameController.text.trim(),
       lastName: _lastNameController.text.trim(),
-      middleName: middle.isEmpty ? null : middle,
-      birthDate: _birthDate!,
     );
 
-    // Editing a detail other than name or birth date cannot create a
-    // duplicate, and must not be blocked by one that already exists.
+    // Editing a detail other than the name cannot create a duplicate,
+    // and must not be blocked by one that already exists.
     final existing = widget.existingPatient;
     if (existing != null &&
         PatientIdentity.of(existing).matches(identity)) {
@@ -231,24 +233,19 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
     if (!mounted) return false;
     if (local != null) {
       setState(() => _isLoading = false);
-      await _showDuplicate(local.fullName, local.birthDate,
-          _describeExisting(local, provider.currentUser?.id));
+      await _showDuplicate(
+          local.fullName, _describeExisting(local, provider.currentUser?.id));
       return false;
     }
 
-    final registeredBy =
+    final registered =
         await provider.findRemoteDuplicate(identity, excludeId: existing?.id);
     if (!mounted) return false;
-    if (registeredBy != null) {
+    if (registered != null) {
       setState(() => _isLoading = false);
-      final name = [identity.firstName, if (middle.isNotEmpty) middle,
-          identity.lastName].join(' ');
       await _showDuplicate(
-        name,
-        identity.birthDate,
-        registeredBy.isEmpty
-            ? 'is already on the RHU register.'
-            : 'is already registered by $registeredBy.',
+        '${identity.firstName} ${identity.lastName}',
+        registered.describe(),
       );
       return false;
     }

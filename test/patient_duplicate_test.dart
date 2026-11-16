@@ -5,6 +5,7 @@ import 'package:diacare/database/database_helper.dart';
 import 'package:diacare/models/health_record.dart';
 import 'package:diacare/models/notification_model.dart';
 import 'package:diacare/models/patient.dart';
+import 'package:diacare/services/register_check_service.dart';
 import 'package:diacare/utils/patient_identity.dart';
 
 void main() {
@@ -56,23 +57,16 @@ void main() {
         updatedAt: now,
       );
 
-  PatientIdentity form(String first, String last,
-          {String? middle, DateTime? born}) =>
-      PatientIdentity(
-        firstName: first,
-        lastName: last,
-        middleName: middle,
-        birthDate: born ?? DateTime(1970, 5, 12),
-      );
+  PatientIdentity form(String first, String last) =>
+      PatientIdentity(firstName: first, lastName: last);
 
   group('PatientIdentity', () {
-    test('ignores case, spacing and the time of day on the birth date', () {
-      final stored = PatientIdentity.of(patient('p',
-          first: 'JUAN', last: 'dela  cruz', born: DateTime(1970, 5, 12, 8)));
+    test('ignores case and spacing', () {
+      final stored =
+          PatientIdentity.of(patient('p', first: 'JUAN', last: 'dela  cruz'));
       expect(form(' juan ', 'Dela Cruz').matches(stored), isTrue);
-      expect(form('Juan', 'Dela Cruz', born: DateTime(1970, 5, 13))
-          .matches(stored), isFalse);
       expect(form('Juana', 'Dela Cruz').matches(stored), isFalse);
+      expect(form('Juan', 'Dela Rosa').matches(stored), isFalse);
     });
 
     test('folds non-ASCII letters that SQLite lower() would miss', () {
@@ -80,15 +74,13 @@ void main() {
       expect(form('Juan', 'Peña').matches(stored), isTrue);
     });
 
-    test('a middle name only separates people when both have one', () {
+    test('same first name and surname is the same person wherever they live',
+        () {
       final stored = PatientIdentity.of(patient('p', middle: 'Mendoza'));
-      expect(form('Juan', 'Dela Cruz').matches(stored), isTrue);
-      expect(form('Juan', 'Dela Cruz', middle: 'm.').matches(stored), isTrue);
-      expect(form('Juan', 'Dela Cruz', middle: 'MENDOZA').matches(stored),
-          isTrue);
-      expect(form('Juan', 'Dela Cruz', middle: 'Santos').matches(stored),
-          isFalse);
-      expect(form('Juan', 'Dela Cruz', middle: 'S').matches(stored), isFalse);
+      final elsewhere = patient('q',
+              middle: 'Santos', born: DateTime(1985, 1, 2))
+          .copyWith(barangay: 'Pantao', purok: 'Purok 7');
+      expect(PatientIdentity.of(elsewhere).matches(stored), isTrue);
     });
   });
 
@@ -181,23 +173,79 @@ void main() {
       expect((await helper.getRecordById('v-later'))?.patientId, 'earlier');
     });
 
+    test('a web registration absorbs an offline one from another place',
+        () async {
+      // Encoded at the RHU and pulled down at sync.
+      await helper.insertPatient(patient('web001', synced: true));
+      // Registered on the phone while offline, different purok, barangay,
+      // middle name and birth date.
+      await helper.insertPatient(patient('app001',
+              first: 'JUAN', middle: 'Reyes', born: DateTime(1980, 3, 3))
+          .copyWith(barangay: 'Pantao', purok: 'Purok 9'));
+      await helper.insertHealthRecord(visit('v-app', 'app001'));
+
+      expect(await helper.mergeOfflineDuplicates('a'), 1);
+      expect(await helper.getPatientById('app001'), isNull);
+      expect((await helper.getRecordById('v-app'))?.patientId, 'web001');
+      expect(await helper.getUnsyncedPatients('a'), isEmpty);
+    });
+
     test('merge leaves different people, other workers and inactive records',
         () async {
       await helper.insertPatient(patient('server', synced: true));
-      await helper.insertPatient(
-          patient('other-middle', middle: 'Santos', synced: true));
-      await helper.insertPatient(patient('different', middle: 'Reyes'));
+      await helper.insertPatient(patient('different', first: 'Pedro'));
       await helper.insertPatient(patient('b-offline', owner: 'b'));
       await helper.insertPatient(patient('inactive-target',
           first: 'Maria', status: 'Inactive', synced: true));
       await helper.insertPatient(patient('maria-offline', first: 'Maria'));
-      await database.update('patients', {'middleName': 'Santos'},
-          where: 'id = ?', whereArgs: ['server']);
 
       expect(await helper.mergeOfflineDuplicates('a'), 0);
       expect(await helper.getPatientById('different'), isNotNull);
       expect(await helper.getPatientById('b-offline'), isNotNull);
       expect(await helper.getPatientById('maria-offline'), isNotNull);
+    });
+
+    test('server-known ids are reported for the sync to tell edits apart',
+        () async {
+      await helper.insertPatient(patient('server', synced: true));
+      await helper.insertPatient(patient('offline', first: 'Pedro'));
+      await helper.insertPatient(patient('other', owner: 'b', synced: true));
+      expect(await helper.getRemoteKnownPatientIds('a'), {'server'});
+    });
+  });
+
+  group('RegisterMatch', () {
+    test('tells the worker where the existing record is', () {
+      expect(
+        const RegisterMatch(
+          patientId: 'web001',
+          assigned: true,
+          heldBy: 'Maria Santos',
+          barangay: 'Bacolod',
+          purok: 'Purok 1',
+        ).describe(),
+        'is already registered (Purok 1, Bacolod) and assigned to Maria Santos.',
+      );
+      expect(const RegisterMatch(patientId: 'x').describe(),
+          'is already registered at the RHU.');
+      expect(
+          const RegisterMatch(patientId: 'x', inactive: true).describe(),
+          contains('inactive'));
+    });
+
+    test('reads the server answer', () {
+      final match = RegisterMatch.fromJson({
+        'patientId': 'web001',
+        'assignedToYou': false,
+        'assigned': false,
+        'heldBy': '',
+        'barangay': 'Bacolod',
+        'purok': '',
+        'inactive': false,
+      });
+      expect(match.patientId, 'web001');
+      expect(match.assigned, isFalse);
+      expect(match.barangay, 'Bacolod');
     });
   });
 }

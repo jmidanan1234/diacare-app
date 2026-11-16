@@ -694,7 +694,8 @@ class DatabaseHelper {
   }
 
   /// Folds registrations this worker made offline into the record of the
-  /// same person that is already assigned to them, and returns how many
+  /// same person (same first name and surname, whatever the purok or
+  /// barangay) that is already assigned to them, and returns how many
   /// were folded.
   ///
   /// The form check only sees what is on the phone. A patient the RHU
@@ -889,6 +890,18 @@ class DatabaseHelper {
     final rCount = (rRes.first['c'] as int?) ?? 0;
     final alerts = await getUnsyncedNotifications(bhwId);
     return pCount + rCount + alerts.length;
+  }
+
+  /// Ids of this worker's patients the server already has a copy of.
+  Future<Set<String>> getRemoteKnownPatientIds(String bhwId) async {
+    final db = await database;
+    final rows = await db.query(
+      'patients',
+      columns: ['id'],
+      where: 'assignedBhwId = ? AND remoteKnown = 1',
+      whereArgs: [bhwId],
+    );
+    return rows.map((row) => row['id'] as String).toSet();
   }
 
   Future<void> markPatientSynced(String patientId) async {

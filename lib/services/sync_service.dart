@@ -13,6 +13,7 @@ import '../models/patient.dart';
 import '../models/sync_log.dart';
 import '../utils/constants.dart';
 import '../utils/patient_identity.dart';
+import 'register_check_service.dart';
 
 class SyncResult {
   final bool success;
@@ -35,18 +36,27 @@ class SyncService {
   factory SyncService() => _instance;
   SyncService._internal()
       : _db = DatabaseHelper(),
-        _firestore = FirebaseFirestore.instance {
+        _firestore = FirebaseFirestore.instance,
+        _lookupRegister = RegisterCheckService.lookup {
     _initConnectivityListener();
   }
 
   SyncService.withStores(
-      {required DatabaseHelper database, required FirebaseFirestore firestore})
+      {required DatabaseHelper database,
+      required FirebaseFirestore firestore,
+      RegisterLookup? lookupRegister})
       : _db = database,
-        _firestore = firestore;
+        _firestore = firestore,
+        _lookupRegister = lookupRegister ?? _emptyRegister;
+
+  static Future<List<RegisterMatch?>> _emptyRegister(
+          List<RegisterQuery> queries) async =>
+      List<RegisterMatch?>.filled(queries.length, null);
 
   static const _keyLastSync = 'last_sync_timestamp';
   final DatabaseHelper _db;
   final FirebaseFirestore _firestore;
+  final RegisterLookup _lookupRegister;
   FirebaseAuth get _auth => FirebaseAuth.instance;
   final _uuid = const Uuid();
 
@@ -195,8 +205,24 @@ class SyncService {
           unsyncedRecords.length +
           unsyncedAlerts.length;
 
+      // Patients the RHU register already has under the same first name
+      // and surname, held back instead of uploaded; see
+      // _holdRegisteredDuplicates.
+      final notes = <String>[];
+      final serverKnownIds = await _db.getRemoteKnownPatientIds(uid);
+      final heldPatientIds = await _holdRegisteredDuplicates(
+          unsyncedPatients, serverKnownIds, notes);
+
       // 2. Upload unsynced patients to Firestore with server confirmation
       for (final p in unsyncedPatients) {
+        if (heldPatientIds.contains(p.id)) {
+          // A patient the server has never seen keeps their visits and
+          // alerts on the phone with them. A renamed patient the server
+          // already has is still a valid target for their visits.
+          if (!serverKnownIds.contains(p.id)) failedPatientIds.add(p.id);
+          heldBackRecords++;
+          continue;
+        }
         try {
           final docRef = _firestore.collection('patients').doc(p.id);
           await docRef.set({
@@ -257,13 +283,15 @@ class SyncService {
            and every chart with nothing to show it went missing. Kept
            unsynced, both go up together on the next attempt. */
         if (failedPatientIds.contains(r.patientId)) {
+          heldBackRecords++;
+          // A duplicate held back on purpose already has its own note.
+          if (heldPatientIds.contains(r.patientId)) continue;
           final heldPatient = await _db.getPatientById(r.patientId);
           final heldName =
               heldPatient == null ? 'a patient' : heldPatient.fullName;
           errors.add(
             'Visit for "$heldName" not sent yet — patient record needs to sync first.',
           );
-          heldBackRecords++;
           continue;
         }
 
@@ -397,7 +425,12 @@ class SyncService {
         status = 'failed';
       }
 
-      final String? errorMessage = errors.isNotEmpty ? errors.join('; ') : null;
+      // The held duplicates go in the log too, so the RHU's Sync
+      // Monitoring shows why a registration never arrived.
+      final String? errorMessage =
+          errors.isNotEmpty || notes.isNotEmpty
+              ? [...notes, ...errors].join('; ')
+              : null;
 
       final log = SyncLog(
         id: logId,
@@ -414,7 +447,8 @@ class SyncService {
          pindot ng Sync Now ay may entry, tinutulak nito palabas ang mga
          tunay na pagtatangka sa history at nagdaragdag ng walang saysay na
          sulat sa Firestore. Ang last-sync time sa ibaba ay na-uupdate pa rin. */
-      final bool nothingToReport = effectiveTotal == 0 && errors.isEmpty;
+      final bool nothingToReport =
+          effectiveTotal == 0 && errors.isEmpty && notes.isEmpty;
 
       if (!nothingToReport) {
         // Save log to local SQLite
@@ -440,7 +474,8 @@ class SyncService {
                   ? ' $mergedDuplicates duplicate registration'
                       '${mergedDuplicates == 1 ? ' was' : 's were'} merged '
                       'into the existing patient record.'
-                  : '');
+                  : '') +
+              (notes.isEmpty ? '' : '\n\n${notes.join('\n\n')}');
 
       final String message;
       if (deactivated) {
@@ -453,7 +488,8 @@ class SyncService {
             : 'Sync complete. $syncedPatients patients, $syncedRecords visits and $syncedAlerts alerts were sent to the RHU.$pulledNote';
       } else if (status == 'partial') {
         message =
-            'Partially synced: $syncedPatients patient(s) and $syncedRecords visit(s) uploaded. Some items failed and will be retried on next sync.';
+            'Partially synced: $syncedPatients patient(s) and $syncedRecords visit(s) uploaded. Some items failed and will be retried on next sync.'
+            '${notes.isEmpty ? '' : '\n\n${notes.join('\n\n')}'}';
       } else {
         message =
             'Sync failed: ${errorMessage ?? "Server error"}. Records remain saved offline.';
@@ -789,57 +825,90 @@ class SyncService {
     return documents;
   }
 
-  /// Looks for a duplicate among this worker's assigned patients on the
-  /// server. Other workers' registrations are private and cannot be
-  /// queried by this phone.
+  /// Looks for a patient with the same first name and surname anywhere on
+  /// the RHU register: registered at the dashboard, held by another
+  /// worker, or assigned to this one since their last sync.
   ///
   /// The local check covers everything already on the phone; this one
-  /// catches a patient the RHU has assigned to this worker since their
-  /// last sync. Same matching rule as the local check (PatientIdentity),
-  /// so the comparison is done here rather than with Firestore equality
-  /// filters, which are case-sensitive.
+  /// covers the rest, through the server, because the security rules only
+  /// let a phone read its own worker's patients.
   ///
-  /// Returns the name of the worker who already has them, an empty string
-  /// if the match is unassigned, or null for no match. Offline, or on any
-  /// error, returns null so a registration in a barangay with no signal is
-  /// never held up — the sync-time merge (mergeOfflineDuplicates) covers
-  /// that case once the phone reconnects.
-  Future<String?> findRemoteDuplicate(PatientIdentity identity,
+  /// Offline, or on any error, returns null so a registration in a
+  /// barangay with no signal is never held up — the same lookup runs
+  /// again at sync (_holdRegisteredDuplicates) before anything uploads.
+  Future<RegisterMatch?> findRemoteDuplicate(PatientIdentity identity,
       {String? excludeId}) async {
     if (!await isOnline) return null;
     if (_auth.currentUser == null) return null;
     try {
-      final snap = await _firestore
-          .collection('patients')
-          .where('assignedBhwId', isEqualTo: _auth.currentUser!.uid)
-          .get()
-          .timeout(const Duration(seconds: 8));
-
-      for (final doc in snap.docs) {
-        if (doc.id == excludeId) continue;
-        final data = doc.data();
-        if (data['isArchived'] == true) continue;
-        final remoteBirth = _asDate(data['birthDate']);
-        if (remoteBirth == null) continue;
-        final remote = PatientIdentity(
-          firstName: data['firstName'] as String? ?? '',
-          lastName: data['lastName'] as String? ?? '',
-          middleName: data['middleName'] as String?,
-          birthDate: remoteBirth,
-        );
-        if (!identity.matches(remote)) continue;
-
-        final otherId = data['assignedBhwId'] as String? ?? '';
-        if (otherId.isEmpty) return '';
-        final worker = await _db.getUserById(otherId);
-        return worker == null
-            ? 'another health worker'
-            : '${worker.firstName} ${worker.lastName}'.trim();
-      }
+      final matches =
+          await _lookupRegister([(id: excludeId, identity: identity)]);
+      return matches.isEmpty ? null : matches.first;
     } catch (_) {
       // Treated as "no known duplicate" — see above.
+      return null;
     }
-    return null;
+  }
+
+  /// Decides which of [patients] must not be uploaded because the RHU
+  /// register already has someone with the same first name and surname,
+  /// and explains each one in [notes]. Returns their ids.
+  ///
+  /// Runs after the pull and mergeOfflineDuplicates, so a match assigned
+  /// to this worker has already been folded in on the phone. What is left
+  /// is a patient registered here while offline who the RHU encoded on
+  /// the dashboard, or who another worker holds. Uploading them would
+  /// create the second record this exists to prevent, and this worker
+  /// cannot write visits to someone else's patient, so the registration
+  /// stays on the phone with its visits. Once the RHU assigns the existing
+  /// record to this worker, the next sync pulls it down and folds the
+  /// offline copy, visits and all, into it.
+  ///
+  /// If the register cannot be reached, nothing new is uploaded this time
+  /// rather than risk a duplicate; it goes up on the next sync.
+  Future<Set<String>> _holdRegisteredDuplicates(List<Patient> patients,
+      Set<String> serverKnownIds, List<String> notes) async {
+    if (patients.isEmpty) return {};
+
+    final List<RegisterMatch?> matches;
+    try {
+      matches = await _lookupRegister([
+        for (final p in patients)
+          (id: p.id, identity: PatientIdentity.of(p)),
+      ]);
+    } catch (_) {
+      final held = {
+        for (final p in patients)
+          if (!serverKnownIds.contains(p.id)) p.id,
+      };
+      if (held.isNotEmpty) {
+        notes.add('${held.length} new patient'
+            '${held.length == 1 ? ' was' : 's were'} not uploaded because '
+            'the RHU register could not be checked for duplicates. They '
+            'stay saved on this phone and will be sent on your next sync.');
+      }
+      return held;
+    }
+
+    final held = <String>{};
+    for (var i = 0; i < patients.length && i < matches.length; i++) {
+      final match = matches[i];
+      if (match == null) continue;
+      final p = patients[i];
+      held.add(p.id);
+      if (serverKnownIds.contains(p.id)) {
+        notes.add('The name change for ${p.fullName} was not uploaded: a '
+            'patient with this name ${match.describe()} Change the name '
+            'back or correct it.');
+      } else {
+        final advice = match.inactive || match.assignedToYou
+            ? ''
+            : ' Ask the RHU to assign them to you — their visits on this '
+                'phone will then be added to that record on your next sync.';
+        notes.add('Not uploaded: ${p.fullName} ${match.describe()}$advice');
+      }
+    }
+    return held;
   }
 
   /// Tells the worker about a follow-up flag the RHU has just raised.
